@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, 
 
 import sympy as sp
 from pyspark.sql import DataFrame
+from tmlt.core.domains.base import Domain
 from tmlt.core.domains.collections import DictDomain
 
 # SparkDataFrameDomain stays a direct import here, unlike in the transformation
@@ -337,9 +338,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def _build_groupby(
         self,
-        # backend: spark-only until the KeySet package -- keyset.dataframe()
-        # below is a Spark DataFrame.
-        input_domain: SparkDataFrameDomain,
+        input_domain: Domain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         mechanism: NoiseMechanism,
         keyset: KeySet,
@@ -355,7 +354,12 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             input_domain=input_domain,
             input_metric=input_metric,
             use_l2=use_l2,
-            group_keys=keyset.dataframe(),
+            # The group keys are a frame of the backend's own kind: the pandas
+            # GroupBy takes a pandas frame and rejects a Spark one. The keys
+            # themselves are the same either way -- which frame a KeySet
+            # materializes as is asked of the KeySet rather than of the ops
+            # table, as the note at the end of Ops explains.
+            group_keys=keyset.dataframe(self.backend),
         )
 
     def _build_adaptive_groupby_agg_and_noise_info(
