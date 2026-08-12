@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 import nox
-from tmlt.nox_utils import DependencyConfiguration, SessionManager
+from nox import session as session
+from tmlt.nox_utils import DependencyConfiguration, SessionManager, install_group
 
 nox.options.default_venv_backend = "uv|virtualenv"
 
@@ -29,6 +30,43 @@ check_installation()
 MIN_COVERAGE = 75
 """For test suites where we track coverage (i.e. the fast tests and the full
 test suite), fail if test coverage falls below this percentage."""
+
+# NOTE (The-Everyone-Project fork): the no-JVM test lane. Mirrors the session of
+# the same name in the Core fork's noxfile.
+NOJVM_TEST_PATHS = [
+    # The backend parity suite. Every test in it that takes the `backend` fixture
+    # is half Spark and half pandas; the Spark halves carry the `spark` marker and
+    # are deselected, so what runs here is the pandas half of the acceptance
+    # suite -- including its draw counts and its distributional gate, neither of
+    # which needs Spark at all.
+    CWD / "test" / "system" / "backend_parity",
+    # The pandas backend's own suites.
+    CWD / "test" / "unit" / "test_pandas_evaluate.py",
+    CWD / "test" / "unit" / "test_backends.py",
+    CWD / "test" / "unit" / "test_unsupported_surface.py",
+    CWD / "test" / "unit" / "test_neighboring_relation_pandas.py",
+    CWD / "test" / "unit" / "test_session_pandas.py",
+    CWD / "test" / "unit" / "test_coerce_pandas_schema.py",
+    CWD / "test" / "unit" / "test_pandas_schema_conversion.py",
+    # The parity harness's self-tests, and the demonstration a parity suite is
+    # copied from. Core's lane includes its own harness self-tests for the same
+    # reason: the harness is what every test above is written against, so a lane
+    # that ran them without it would not be checking the same thing.
+    CWD / "test" / "unit" / "test_backend_testing.py",
+    CWD / "test" / "unit" / "test_backend_parity_demo.py",
+]
+"""Test paths the test-nojvm session runs.
+
+Every path here has been checked to pass with ``TMLT_FORBID_JVM=1`` and
+``-m "not spark"``. One pandas suite is deliberately *absent*:
+``test/unit/keysets/test_pandas_materialization.py``. It compares a KeySet
+materialized on pandas against the same KeySet materialized on Spark, and it
+reaches Spark through ``KeySet.dataframe()`` inside the test body rather than by
+requesting the ``spark`` fixture -- so the collection hook in test/conftest.py
+cannot see that it needs a JVM, and 56 of its tests boot one. Adding it would
+need those tests to request the fixture or carry the marker; until then it is
+excluded by path rather than allowed to fail the lane.
+"""
 
 
 def is_mac():
@@ -201,6 +239,36 @@ sm.test()
 sm.test_fast()
 sm.test_slow()
 sm.test_doctest()
+
+
+# NOTE (The-Everyone-Project fork): the no-JVM lane, mirroring Core's.
+@session(name="test-nojvm", tags=["test"], python="3.10")
+@sm._install_package  # noqa: SLF001
+@install_group("test")
+def test_nojvm(sess):
+    """Run the tests that must not start a JVM.
+
+    pyspark is installed here exactly as it is everywhere else -- it is an
+    unconditional dependency, and modules like tmlt.analytics._backends import it
+    at module scope. What this session checks is the stronger, and more useful,
+    property that the pandas code paths never *start* one: TMLT_FORBID_JVM makes
+    the guard in test/conftest.py replace pyspark's launch_gateway, so any test
+    that reaches for a Spark session fails loudly instead of quietly booting a
+    JVM. The Spark-dependent tests are deselected by '-m "not spark"', which the
+    same conftest applies structurally rather than test by test.
+
+    This reuses SessionManager's private helpers rather than duplicating its
+    pytest invocation. noxfile.py is not linted, and keeping the argument list in
+    one place is worth the private access.
+
+    Args:
+        sess: The nox session.
+    """
+    sess.env["TMLT_FORBID_JVM"] = "1"
+    sm._test(  # noqa: SLF001
+        sess, "not spark", min_coverage=0, test_paths=NOJVM_TEST_PATHS
+    )
+
 
 sm.docs_linkcheck()
 sm.docs_doctest()

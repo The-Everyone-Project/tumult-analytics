@@ -5,13 +5,18 @@
 
 # TODO(#2206): Import these fixtures from core once it is rewritten
 
+import atexit
 import logging
-from typing import Any, Dict, List, TypeVar, Union, cast, overload
+import os
+import sys
+from typing import Any, Dict, Iterator, List, NoReturn, TypeVar, Union, cast, overload
 from unittest.mock import Mock, create_autospec
 
 import numpy as np
 import pandas as pd
 import pytest
+from pyspark import java_gateway
+from pyspark.context import SparkContext
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.types import FloatType, LongType, StringType, StructField, StructType
 from tmlt.core.domains.base import Domain
@@ -22,6 +27,7 @@ from tmlt.core.measurements.base import Measurement
 from tmlt.core.measures import Measure, PureDP
 from tmlt.core.metrics import AbsoluteDifference, Metric
 from tmlt.core.transformations.base import Transformation
+from tmlt.core.utils import cleanup as core_cleanup
 from tmlt.core.utils.exact_number import ExactNumber
 
 from tmlt.analytics import (
@@ -453,3 +459,154 @@ def _session_data(spark):
         "join_private_data": join_private_sdf,
         "join_public_data": join_public_sdf,
     }
+
+
+################################################################################
+# NOTE (The-Everyone-Project fork): keeping the JVM out of the pandas test lane.
+#
+# Everything below is additive. It defines two new things -- a collection hook
+# that marks the Spark-dependent tests, and an opt-in guard that turns starting a
+# JVM into a failure -- and changes nothing above: no existing fixture is
+# replaced, rewired, or renamed, and with TMLT_FORBID_JVM unset the guard does
+# nothing at all, so an ordinary `pytest` run behaves exactly as it did.
+#
+# This mirrors the same block in the Core fork's test/conftest.py, which the
+# `test-nojvm` nox session there has been running against for as long as the
+# pandas stack has existed. See noxfile.py's test_nojvm for what the lane is for.
+################################################################################
+
+
+def _requires_spark(item: pytest.Item) -> bool:
+    """Returns whether a collected test needs a Spark session to run.
+
+    Two routes, because the suite has two:
+
+    * The ``spark`` fixture (or another fixture that requests it) appearing
+      anywhere in the test's fixture closure. ``item.fixturenames`` is the whole
+      closure, so this covers ``spark_with_progress`` and ``_session_data`` as
+      well as a direct request.
+    * The ``backend`` fixture's ``spark`` parameter. A test parametrized over
+      backends is *half* a Spark test: the fixture resolves its Spark session with
+      ``getfixturevalue`` precisely so that the pandas parameter never starts a
+      JVM, which also keeps ``spark`` out of the static closure above. Reading the
+      parameter is what tells the two halves apart.
+
+    Args:
+        item: The collected test item.
+
+    Returns:
+        Whether the item needs a Spark session.
+    """
+    if "spark" in getattr(item, "fixturenames", ()):
+        return True
+    callspec = getattr(item, "callspec", None)
+    params = getattr(callspec, "params", {}) if callspec is not None else {}
+    if params.get("backend") == "spark":
+        return True
+    backend = params.get("backend")
+    return getattr(backend, "name", None) == "spark"
+
+
+def pytest_collection_modifyitems(items: List[pytest.Item]) -> None:
+    """Applies the ``spark`` marker to every test that needs a Spark session.
+
+    Marking structurally rather than by annotating each test keeps this in one
+    place: there are hundreds of them, and one that was meant to be marked but
+    was not would quietly boot a JVM in the ``test-nojvm`` lane. Tests that reach
+    Spark by some third route are not detected here -- :func:`forbid_jvm` is what
+    catches those, at runtime.
+
+    Args:
+        items: The collected test items, marked in place.
+    """
+    for item in items:
+        if _requires_spark(item):
+            item.add_marker(pytest.mark.spark)
+
+
+FORBID_JVM_ENV_VAR = "TMLT_FORBID_JVM"
+"""Setting this to 1 forbids the test process from starting a JVM.
+
+The ``test-nojvm`` nox session sets it; see :func:`forbid_jvm`."""
+
+_FORBID_JVM_MESSAGE = (
+    f"{FORBID_JVM_ENV_VAR} is set, but something tried to start a JVM.\n"
+    "\n"
+    "This test lane runs with pyspark installed and is meant to prove that the "
+    "pandas code paths never boot it. If the test that triggered this really "
+    "does need a Spark session, make sure it requests the `spark` fixture (or "
+    "runs on the `backend` fixture's spark parameter) so that the collection "
+    "hook marks it and -m 'not spark' deselects it. Otherwise, a code path that "
+    "is supposed to be Spark-free reached for a SparkSession."
+)
+
+
+def _forbidden_launch_gateway(*_args: Any, **_kwargs: Any) -> NoReturn:
+    """Stands in for pyspark's ``launch_gateway`` and refuses to start a JVM.
+
+    Raises:
+        AssertionError: Always.
+    """
+    raise AssertionError(_FORBID_JVM_MESSAGE)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def forbid_jvm() -> Iterator[None]:
+    """Turns any attempt to start a JVM into a loud failure, when opted in.
+
+    Only active when ``TMLT_FORBID_JVM`` is set, so ordinary test runs are
+    unaffected -- which is what makes this additive.
+
+    ``launch_gateway`` is the one function that actually spawns the JVM
+    (``SparkSession.builder.getOrCreate()`` reaches it through
+    ``SparkContext._ensure_initialized``), so replacing it catches every route
+    into a Spark session whichever API built it. It has to be replaced on every
+    pyspark module that imported the *name*, not just on the one that defines it:
+    ``pyspark.context`` does ``from pyspark.java_gateway import launch_gateway``,
+    and that binding is the one ``getOrCreate()`` calls.
+
+    The replacement is deliberately never undone. Nothing after the last test may
+    start a JVM either, and ``atexit`` hooks -- which is where Core's temporary
+    table cleanup lives -- run long after fixture teardown.
+
+    Yields:
+        Nothing.
+
+    Raises:
+        AssertionError: If a JVM was already running before the first test.
+        RuntimeError: If pyspark's ``launch_gateway`` could not be replaced.
+    """
+    if os.environ.get(FORBID_JVM_ENV_VAR, "") not in ("1", "true", "True"):
+        yield
+        return
+
+    # A JVM started while test modules were being imported would predate this
+    # fixture, so check for one rather than assume.
+    if SparkContext._gateway is not None:
+        raise AssertionError(
+            f"{FORBID_JVM_ENV_VAR} is set, but a JVM was already running before "
+            "the first test started -- something booted one during collection."
+        )
+
+    for name, module in list(sys.modules.items()):
+        if name != "pyspark" and not name.startswith("pyspark."):
+            continue
+        if getattr(module, "launch_gateway", None) is not None:
+            setattr(module, "launch_gateway", _forbidden_launch_gateway)
+
+    # Importing tmlt.core.utils.cleanup registers an atexit hook that calls
+    # SparkSession.builder.getOrCreate() to drop Core's temporary database. In
+    # this lane no session ever exists, so there is no temporary database to
+    # drop -- but the hook would still boot a JVM, and it runs after pytest has
+    # returned, where raising only prints "Exception ignored in atexit callback"
+    # and leaves the exit code untouched. Since the lane could not fail on it,
+    # drop it. Note that this is the guard working around library behaviour, not
+    # proving anything about it.
+    atexit.unregister(core_cleanup._cleanup_temp)
+
+    if java_gateway.launch_gateway is not _forbidden_launch_gateway:
+        raise RuntimeError(
+            "Could not install the no-JVM guard: pyspark.java_gateway does not "
+            "have a launch_gateway to replace."
+        )
+    yield
