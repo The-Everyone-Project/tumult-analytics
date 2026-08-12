@@ -41,7 +41,15 @@ from tmlt.core.utils.type_utils import assert_never
 from typeguard import check_type, typechecked
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import (
+    DATAFRAME_DOMAIN_TYPES,
+    SPARK,
+    Backend,
+    NotSupportedByBackend,
+    backend_for_domain,
+)
 from tmlt.analytics._base_builder import (
+    AnyDataFrame,
     BaseBuilder,
     DataFrameMixin,
     PrivacyBudgetMixin,
@@ -108,6 +116,42 @@ from tmlt.analytics.query_builder import (
 )
 
 __all__ = ["Session"]
+
+
+def _backend_for_accountant_domain(domain: DictDomain) -> Backend:
+    """Return the backend whose tables a Session accountant's domain holds.
+
+    A Session is handed an accountant, not a backend, and the accountant's input
+    domain is the only record of which backend built it: a dictionary -- nested
+    one level deeper for tables in an ID space -- whose leaves are table
+    domains. Those leaves all belong to one backend, since the tables were added
+    together through one builder, and this recovers which.
+
+    The tables walked are the ones the Session considers its own -- the same
+    ones :attr:`Session.private_sources` lists -- so that the backend is derived
+    from exactly the tables that will be queried.
+
+    Args:
+        domain: The accountant's input domain.
+
+    Raises:
+        AnalyticsInternalError: If the domain holds no tables, if one of them is
+            not a table domain, or if they disagree about their backend.
+    """
+    backends = {
+        backend_for_domain(lookup_domain(domain, ref))
+        for ref in find_named_tables(domain)
+    }
+    if not backends:
+        raise AnalyticsInternalError(
+            "A Session's input domain must contain at least one table."
+        )
+    if len(backends) > 1:
+        raise AnalyticsInternalError(
+            "A Session's tables must all be on one backend, but its input domain"
+            f" holds tables of {', '.join(sorted(b.name for b in backends))}."
+        )
+    return backends.pop()
 
 
 def _generate_neighboring_relation(sources: Dict[str, PrivateDataFrame]) -> Conjunction:
@@ -324,6 +368,7 @@ class Session:
             raise ValueError("The input metric to a session must be a DictMetric.")
         if not isinstance(self._accountant.input_domain, DictDomain):
             raise ValueError("The input domain to a session must be a DictDomain.")
+        self._backend = _backend_for_accountant_domain(self._accountant.input_domain)
         self._public_sources = public_sources
         # Note: Currently, only NamedTable identifiers make sense as keys here,
         #     and we may assume that no other types of identifiers are included.
@@ -341,6 +386,10 @@ class Session:
         protected_change: ProtectedChange,
     ) -> "Session":
         """Initializes a DP session from a Spark dataframe.
+
+        This constructor is Spark-only. A Session on another backend is built
+        through :class:`~tmlt.analytics.Session.Builder`, which takes that
+        backend's tables.
 
         Only one private data source is supported with this initialization
         method; if you need multiple data sources, use
@@ -405,7 +454,7 @@ class Session:
     def _create_accountant_from_neighboring_relation(
         cls: Type["Session"],
         privacy_budget: PrivacyBudget,
-        private_sources: Dict[str, DataFrame],
+        private_sources: Dict[str, AnyDataFrame],
         relation: NeighboringRelation,
     ) -> Tuple[PrivacyAccountant, Any]:
         output_measure: Union[PureDP, ApproxDP, RhoZCDP]
@@ -457,7 +506,7 @@ class Session:
     def _from_neighboring_relation(
         cls: Type["Session"],
         privacy_budget: PrivacyBudget,
-        private_sources: Dict[str, DataFrame],
+        private_sources: Dict[str, AnyDataFrame],
         relation: NeighboringRelation,
     ) -> "Session":
         """Initializes a DP session using the provided :class:`NeighboringRelation`.
@@ -704,7 +753,7 @@ class Session:
         groupby_keys: Optional[Union[KeySet, Tuple[str, ...]]] = None,
     ) -> str:
         """Build a description of a query object."""
-        compiler = QueryExprCompiler(self._output_measure)
+        compiler = QueryExprCompiler(self._output_measure, backend=self._backend)
         schema = compiler.query_schema(query_obj, self._catalog)
         description = _describe_schema(schema)
         constraints: Optional[List[Constraint]] = None
@@ -715,6 +764,13 @@ class Session:
                 input_metric=self._input_metric,
                 catalog=self._catalog,
             )[2]
+        except NotSupportedByBackend:
+            # This one is a real failure: the query names an operation this
+            # backend does not have, and describing it as though it had
+            # succeeded would tell the user their query is fine when evaluating
+            # it will not be. It is caught before the clause below only because
+            # it is a NotImplementedError, which that clause swallows.
+            raise
         except NotImplementedError:
             # If the query results in a measurement, this will happen.
             # There are no constraints on measurements, so we can just
@@ -786,8 +842,10 @@ class Session:
         ref = find_reference(source_id, self._input_domain)
         if ref is not None:
             domain = lookup_domain(self._input_domain, ref)
-            return spark_dataframe_domain_to_analytics_columns(domain)
+            return self._backend.domain_to_analytics_columns(domain)
 
+        # Public tables are Spark-only whatever the private tables are on, so
+        # this side does not go through the backend.
         try:
             return spark_schema_to_analytics_columns(
                 self.public_source_dataframes[source_id].schema
@@ -894,10 +952,7 @@ class Session:
     @property
     def _catalog(self) -> Catalog:
         """Returns a Catalog of tables in the Session."""
-        # TODO(#session-backend): the Session has no backend of its own yet, so
-        # the catalog it rebuilds on each access gets the SPARK default. When
-        # the Session gains one, pass it here: Catalog(backend=self._backend).
-        catalog = Catalog()
+        catalog = Catalog(backend=self._backend)
         for table in self.private_sources:
             catalog.add_private_table(
                 table,
@@ -918,6 +973,10 @@ class Session:
     @typechecked
     def add_public_dataframe(self, source_id: str, dataframe: DataFrame):
         """Adds a public data source to the session.
+
+        Public tables are Spark DataFrames whatever the Session's private tables
+        are, so this takes a Spark one on every backend -- and on a backend with
+        no join-public, refuses it, since nothing could ever read it.
 
         Not all Spark column types are supported in public sources; see
         :class:`~tmlt.analytics.ColumnType` for information about which types are
@@ -963,12 +1022,23 @@ class Session:
         Args:
             source_id: The name of the public data source.
             dataframe: The public data source corresponding to the ``source_id``.
+
+        Raises:
+            NotSupportedByBackend: If this Session is not on the Spark backend.
+                Public tables exist to be joined against, and no other backend
+                has a public join yet.
         """
+        if self._backend is not SPARK:
+            raise NotSupportedByBackend.for_op(
+                "Public tables",
+                self._backend.name,
+                f"Table '{source_id}' cannot be added: this backend has no"
+                " join-public, so a public table on it could never be read.",
+            )
         assert_is_identifier(source_id)
         if source_id in self.public_sources or source_id in self.private_sources:
             raise ValueError(f"This session already has a table named '{source_id}'.")
-        dataframe = coerce_spark_schema_or_fail(dataframe)
-        self._public_sources[source_id] = dataframe
+        self._public_sources[source_id] = coerce_spark_schema_or_fail(dataframe)
 
     def _compile_and_get_info(
         self,
@@ -991,7 +1061,9 @@ class Session:
 
         adjusted_budget = self._process_requested_budget(privacy_budget)
 
-        measurement, noise_info = QueryExprCompiler(self._output_measure)(
+        measurement, noise_info = QueryExprCompiler(
+            self._output_measure, backend=self._backend
+        )(
             query=query_expr,
             privacy_budget=adjusted_budget,
             stability=self._accountant.d_in,
@@ -1228,7 +1300,7 @@ class Session:
         query = query_expr._query_expr
 
         transformation, ref, constraints = QueryExprCompiler(
-            self._output_measure
+            self._output_measure, backend=self._backend
         ).build_transformation(
             query=query,
             input_domain=self._input_domain,
@@ -1236,8 +1308,20 @@ class Session:
             catalog=self._catalog,
         )
         if cache:
+            if self._backend.ops.Persist is None:
+                # Not an error: caching is a performance request, and this
+                # backend's answer to it is that there is nothing to cache -- its
+                # tables are already materialized in memory. Say so rather than
+                # letting the caller believe something happened.
+                warn(
+                    f"Ignoring cache=True for view '{source_id}': the"
+                    f" {self._backend.name} backend has nothing to cache, as its"
+                    " tables are already in memory."
+                )
             transformation, ref = persist_table(
-                base_transformation=transformation, base_ref=ref
+                base_transformation=transformation,
+                base_ref=ref,
+                backend=self._backend,
             )
 
         transformation, _ = rename_table(
@@ -1264,18 +1348,18 @@ class Session:
             )
 
         domain = lookup_domain(self._input_domain, ref)
-        if not isinstance(domain, SparkDataFrameDomain):
+        if not isinstance(domain, DATAFRAME_DOMAIN_TYPES):
             raise AnalyticsInternalError(
-                "Expected domain to be a SparkDataFrameDomain, but got"
-                f" {type(domain)} instead."
+                f"Expected domain to be a table domain, but got {type(domain)} instead."
             )
 
         unpersist_source: Transformation = Identity(
             domain=self._input_domain, metric=self._input_metric
         )
-        # Unpersist does nothing if the DataFrame isn't persisted
+        # Unpersist does nothing if the DataFrame isn't persisted, and nothing at
+        # all on a backend that has no persist.
         unpersist_source = unpersist_table(
-            base_transformation=unpersist_source, base_ref=ref
+            base_transformation=unpersist_source, base_ref=ref, backend=self._backend
         )
 
         transformation = delete_table(
@@ -1557,7 +1641,19 @@ class Session:
             column: The name of the column partitioning on.
             splits: Mapping of split name to value of partition.
                 Split name is ``source_id`` in new session.
+
+        Raises:
+            NotSupportedByBackend: If this Session's backend has no partition
+                transformation. This is checked before anything else, so a
+                rejected partition spends no budget.
         """
+        if self._backend.ops.PartitionByKeys is None:
+            raise NotSupportedByBackend.for_op(
+                "partition_and_create",
+                self._backend.name,
+                f"Table '{source_id}' cannot be partitioned: this backend has no"
+                " partition transformation. No privacy budget has been spent.",
+            )
         # If you remove this if-block, mypy will complain
         if not (
             isinstance(self._accountant.privacy_budget, ExactNumber)

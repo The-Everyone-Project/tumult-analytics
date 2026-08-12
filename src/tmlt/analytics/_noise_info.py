@@ -7,6 +7,7 @@ from enum import Enum
 from functools import singledispatch
 from typing import Any, Dict, Iterable, List, Set, Tuple, Union
 
+import pandas as pd
 from pyspark.sql import DataFrame
 from tmlt.core.measurements.base import Measurement
 from tmlt.core.measurements.noise_mechanisms import (
@@ -126,6 +127,14 @@ def _(df: DataFrame) -> str:
     # pickle threads.)
     # for now, just report that there was a DataFrame here
     return f"<a Spark DataFrame with columns: {df.columns}>"
+
+
+@_get_info.register(pd.DataFrame)
+def _(df: pd.DataFrame) -> str:
+    # As above: report the frame rather than copying it. A pandas frame can be
+    # deep-copied, unlike a Spark one, but noise info has no use for the data
+    # and copying a large frame to describe it would be pure waste.
+    return f"<a pandas DataFrame with columns: {list(df.columns)}>"
 
 
 def _noise_from_measurement(m: Measurement) -> NoiseInfo:

@@ -259,6 +259,17 @@ module = "test.*"
 disallow_untyped_defs = false
 check_untyped_defs = true
 
+# pandas ships no py.typed marker, so `pandas.DataFrame` is `Any` to mypy, and a
+# parameter annotated `Union[pyspark.sql.DataFrame, pandas.DataFrame]` -- which
+# is what the builder takes now that it accepts either backend's tables --
+# accepts anything at all. The `# type: ignore` comments this module puts on
+# calls that pass a deliberately wrong dataframe are therefore reported as
+# unused, though at runtime typeguard still rejects those calls, which is what
+# the tests assert. Drop this override if pandas-stubs is ever added.
+[[tool.mypy.overrides]]
+module = "test.unit.base_builder.test_mixins"
+warn_unused_ignores = false
+
 ################################################################################
 # Test configuration
 
