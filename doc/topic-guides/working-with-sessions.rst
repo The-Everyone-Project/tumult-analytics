@@ -110,6 +110,17 @@ Next, add a private source to it:
         protected_change=AddOneRow(),
     )
 
+..
+    NOTE (The-Everyone-Project fork): pointer to the new backends topic guide,
+    which is where the pandas backend is documented.
+
+.. note::
+
+    The builder is also where the *backend* is chosen: hand it a pandas dataframe
+    instead of a Spark one, and the Session runs its queries in memory rather than
+    on Spark. See the :ref:`backends topic guide<backends>` for how that choice is
+    made and which queries a pandas Session can answer.
+
 You may add additional private sources to the Session, although this is
 a more advanced and uncommon use case. Suppose you had additional private
 data stored in a CSV file:

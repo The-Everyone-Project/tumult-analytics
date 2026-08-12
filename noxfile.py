@@ -60,6 +60,10 @@ NOJVM_TEST_PATHS = [
     # that ran them without it would not be checking the same thing.
     CWD / "test" / "unit" / "test_backend_testing.py",
     CWD / "test" / "unit" / "test_backend_parity_demo.py",
+    # The check that the documented feature matrix is the computed one: it reads
+    # the same tables the compiler's rejection gate reads, and the docs sources.
+    # No data and no engine, so no JVM.
+    CWD / "test" / "unit" / "test_docs_feature_matrix.py",
 ]
 """Test paths the test-nojvm session runs.
 
