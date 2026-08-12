@@ -3,11 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2025
 
-from typing import Callable, Dict, Optional, Tuple, Type, cast
+from typing import Callable, Dict, Optional, Tuple, Type
 
 from tmlt.core.domains.base import Domain
 from tmlt.core.domains.collections import DictDomain
-from tmlt.core.domains.spark_domains import SparkDataFrameDomain
 from tmlt.core.metrics import AddRemoveKeys, DictMetric, Metric
 from tmlt.core.transformations.base import Transformation
 from tmlt.core.transformations.dictionary import (
@@ -17,17 +16,9 @@ from tmlt.core.transformations.dictionary import (
     create_transform_value,
 )
 from tmlt.core.transformations.identity import Identity
-from tmlt.core.transformations.spark_transformations.add_remove_keys import (
-    PersistValue as PersistValueTransformation,
-    RenameValue as RenameValueTransformation,
-    UnpersistValue as UnpersistValueTransformation,
-)
-from tmlt.core.transformations.spark_transformations.persist import (
-    Persist as PersistTransformation,
-    Unpersist as UnpersistTransformation,
-)
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._table_identifier import Identifier, TemporaryTable
 from tmlt.analytics._table_reference import TableReference, lookup_domain, lookup_metric
 
@@ -99,6 +90,8 @@ def rename_table(
     base_transformation: Transformation,
     base_ref: TableReference,
     new_table_id: Identifier,
+    *,
+    backend: Backend = SPARK,
 ) -> Tuple[Transformation, TableReference]:
     """Renames tables.
 
@@ -137,8 +130,8 @@ def rename_table(
                 f"Expected AddRemoveKeys but got {type(pm).__name__}."
             )
         # Note: No dataframe column is getting renamed here;
-        # RenameValueTransformation is used to rename tables
-        return RenameValueTransformation(pd, pm, base_ref.identifier, tgt, {})
+        # RenameValue is used to rename tables
+        return backend.require("RenameValue")(pd, pm, base_ref.identifier, tgt, {})
 
     transformation_generators: Dict[Type[Metric], Callable] = {
         DictMetric: gen_transformation_dictmetric,
@@ -200,8 +193,17 @@ def persist_table(
     base_transformation: Transformation,
     base_ref: TableReference,
     new_table_id: Optional[Identifier] = None,
+    *,
+    backend: Backend = SPARK,
 ) -> Tuple[Transformation, TableReference]:
-    """Persists tables."""
+    """Persists tables.
+
+    A backend with nothing to persist -- one whose tables are already in memory,
+    say -- has no ``Persist`` operation, and for it this is a no-op returning the
+    transformation and reference it was given.
+    """
+    if backend.ops.Persist is None:
+        return base_transformation, base_ref
 
     def gen_transformation_dictmetric(pd, pm, tgt):
         if not isinstance(pd, DictDomain):
@@ -217,10 +219,8 @@ def persist_table(
             pm,
             base_ref.identifier,
             tgt,
-            PersistTransformation(
-                domain=cast(
-                    SparkDataFrameDomain, pd.key_to_domain[base_ref.identifier]
-                ),
+            backend.require("Persist")(
+                domain=pd.key_to_domain[base_ref.identifier],
                 metric=pm.key_to_metric[base_ref.identifier],
             ),
             lambda *args: None,
@@ -235,7 +235,7 @@ def persist_table(
             raise AnalyticsInternalError(
                 f"Expected AddRemoveKeys but got {type(pm).__name__}."
             )
-        return PersistValueTransformation(pd, pm, base_ref.identifier, tgt)
+        return backend.require("PersistValue")(pd, pm, base_ref.identifier, tgt)
 
     transformation_generators: Dict[Type[Metric], Callable] = {
         DictMetric: gen_transformation_dictmetric,
@@ -248,9 +248,18 @@ def persist_table(
 
 
 def unpersist_table(
-    base_transformation: Transformation, base_ref: TableReference
+    base_transformation: Transformation,
+    base_ref: TableReference,
+    *,
+    backend: Backend = SPARK,
 ) -> Transformation:
-    """Unpersists tables."""
+    """Unpersists tables.
+
+    As with :func:`persist_table`, this is a no-op on a backend that has no
+    ``Unpersist`` operation.
+    """
+    if backend.ops.Unpersist is None:
+        return base_transformation
 
     def gen_transformation_dictmetric(pd, pm, tgt):
         if not isinstance(pd, DictDomain):
@@ -266,10 +275,8 @@ def unpersist_table(
             pm,
             base_ref.identifier,
             tgt,
-            UnpersistTransformation(
-                domain=cast(
-                    SparkDataFrameDomain, pd.key_to_domain[base_ref.identifier]
-                ),
+            backend.require("Unpersist")(
+                domain=pd.key_to_domain[base_ref.identifier],
                 metric=pm.key_to_metric[base_ref.identifier],
             ),
             lambda *args: None,
@@ -284,7 +291,7 @@ def unpersist_table(
             raise AnalyticsInternalError(
                 f"Expected AddRemoveKeys but got {type(pm).__name__}."
             )
-        return UnpersistValueTransformation(pd, pm, base_ref.identifier, tgt)
+        return backend.require("UnpersistValue")(pd, pm, base_ref.identifier, tgt)
 
     transformation_generators: Dict[Type[Metric], Callable] = {
         DictMetric: gen_transformation_dictmetric,
