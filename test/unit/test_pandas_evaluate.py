@@ -414,6 +414,45 @@ def test_ark_rename_map_select_before_enforce(budget: PrivacyBudget):
     )
 
 
+@pytest.mark.parametrize("budget", _UNBOUNDED_BUDGETS)
+def test_create_view_over_an_id_table(budget: PrivacyBudget):
+    """A view over an ``AddRowsWithID`` table can be created and queried.
+
+    Regression test: of the table-plumbing helpers ``create_view`` chains,
+    ``rename_table`` was the one call in ``session.py`` that did not pass the
+    Session's backend. On the ID path the rename is a ``RenameValue``, so the
+    default built Spark's against a pandas domain and the view failed on
+    exactly this shape -- while a view over a non-ID table sailed through.
+    """
+    session = _id_session(budget)
+    session.create_view(QueryBuilder("t").enforce(MaxRowsPerID(2)), "v", cache=False)
+    answer = session.evaluate(QueryBuilder("v").groupby(A_KEYS).count(), budget)
+    _assert_answer(
+        answer,
+        _expected([("a", 2), ("b", 1), ("c", 4), ("d", 0)], ["A", "count"]),
+        ["A"],
+    )
+
+
+@pytest.mark.parametrize("budget", _UNBOUNDED_BUDGETS)
+def test_describe_reports_the_group_count(
+    budget: PrivacyBudget, capsys: pytest.CaptureFixture
+):
+    """``describe`` of a grouped query counts the groups on this backend.
+
+    Regression test: the group count in the description sizes the KeySet, and
+    was the one KeySet call in ``session.py`` that did not pass the Session's
+    backend. The keyset here is a join, whose size cannot be read off its
+    operands -- sizing it materializes it, so on a pandas Session the Spark
+    default booted the JVM this module's test lane forbids. (A ``from_dict``
+    keyset would not catch this: its size is structural, on any backend.)
+    """
+    session = _session(budget)
+    joined = A_KEYS.join(KeySet.from_dict({"A": ["a", "b"], "G": ["x", "y"]}))
+    session.describe(QueryBuilder("t").groupby(joined))
+    assert "(4 groups)" in capsys.readouterr().out
+
+
 def test_the_ark_path_uses_the_pandas_value_wrappers():
     """The ``*Value`` wrappers the ARK path builds are Core's pandas ones.
 

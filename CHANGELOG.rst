@@ -46,6 +46,8 @@ Fixed
 ~~~~~
 - Compiling a group-by materializes its :class:`~tmlt.analytics.KeySet` once rather than three or four times. The measurement visitor read ``keyset.dataframe().columns`` in twelve places to learn column names that :meth:`.KeySet.columns` returns directly, and every one of those reads built the KeySet's dataframe. This is a Spark-side improvement, independent of the new backend.
 - :meth:`~tmlt.analytics.Session.describe` of a query the Session's backend cannot answer reports the refusal, rather than describing the query as though evaluating it would succeed.
+- :meth:`~tmlt.analytics.Session.create_view` works on the pandas backend for tables protected by :class:`~tmlt.analytics.AddRowsWithID`. The view's final rename was the one seam in ``Session`` that did not pass the Session's backend, so it built Spark's ``RenameValue`` against a pandas domain and failed. Views over non-ID tables were unaffected.
+- :meth:`~tmlt.analytics.Session.describe` of a grouped query sizes its :class:`~tmlt.analytics.KeySet` on the Session's backend. Previously it sized on Spark regardless, which on a pandas Session started the JVM when the keyset's size required materializing it (a join, for instance -- keysets with structurally known sizes never noticed).
 
 .. _v0.21.0:
 

@@ -798,7 +798,7 @@ class Session:
             description += "\nGrouped on columns "
             col_strs = [f"'{col}'" for col in groupby_keys.schema()]
             description += ", ".join(col_strs)
-            description += f" ({groupby_keys.size()} groups)"
+            description += f" ({groupby_keys.size(self._backend)} groups)"
         return description
 
     def _spend_budget_without_executing(
@@ -1339,6 +1339,7 @@ class Session:
             base_transformation=transformation,
             base_ref=ref,
             new_table_id=NamedTable(source_id),
+            backend=self._backend,
         )
         self._accountant.transform_in_place(transformation)
         self._table_constraints[NamedTable(source_id)] = constraints
