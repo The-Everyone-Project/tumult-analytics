@@ -1190,10 +1190,65 @@ class Session:
             privacy_budget: The privacy budget used for the query.
         """
         check_type(query_expr, Query)
-        query = query_expr._query_expr
         measurement, adjusted_budget, _ = self._compile_and_get_info(
-            query, privacy_budget
+            query_expr._query_expr, privacy_budget
         )
+        return self._evaluate_compiled(measurement, adjusted_budget, privacy_budget)
+
+    def _evaluate_with_noise_info(
+        self,
+        query_expr: Query,
+        privacy_budget: PrivacyBudget,
+    ) -> Tuple[Any, List[Dict[str, Any]]]:
+        """Answers a query, and describes the noise the answer carries.
+
+        :meth:`evaluate` and :meth:`_noise_info` each compile the query, so
+        asking for both -- which is what a caller who wants to report the noise
+        alongside the answer has to do -- compiles it twice. This does it once.
+
+        Compiling twice is not merely slower. The noise information a caller
+        reports is supposed to describe the answer it is reported with, and two
+        compilations only produce the same measurement while nothing about the
+        Session has changed in between; a view created, or a constraint
+        enforced, between the two calls would silently make the report describe
+        a measurement that never ran. Here there is one measurement and one
+        budget, so that cannot come apart -- the invariant is structural rather
+        than a rule the caller has to follow.
+
+        Args:
+            query_expr: One query expression to answer.
+            privacy_budget: The privacy budget used for the query.
+
+        Returns:
+            The answer, and the noise information for the measurement that
+            produced it.
+        """
+        check_type(query_expr, Query)
+        measurement, adjusted_budget, noise_info = self._compile_and_get_info(
+            query_expr._query_expr, privacy_budget
+        )
+        answer = self._evaluate_compiled(measurement, adjusted_budget, privacy_budget)
+        return answer, list(iter(noise_info))
+
+    def _evaluate_compiled(
+        self,
+        measurement: Measurement,
+        adjusted_budget: PrivacyBudget,
+        privacy_budget: PrivacyBudget,
+    ) -> Any:
+        """Runs an already-compiled measurement against the accountant.
+
+        The half of :meth:`evaluate` that follows compilation, factored out so
+        that :meth:`_evaluate_with_noise_info` can reach it with a measurement
+        it compiled itself.
+
+        Args:
+            measurement: The compiled measurement to run.
+            adjusted_budget: The budget it was compiled for, and the ``d_out``
+                it is measured at.
+            privacy_budget: The budget the caller asked for, which the
+                insufficient-budget message is phrased in terms of.
+        """
         self._activate_accountant()
 
         if xor(

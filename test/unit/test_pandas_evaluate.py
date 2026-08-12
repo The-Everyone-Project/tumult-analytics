@@ -501,6 +501,36 @@ def test_noise_info_is_reachable():
     assert session.remaining_privacy_budget == PureDPBudget(10)
 
 
+def test_evaluate_with_noise_info_answers_and_describes_in_one_compile():
+    """One call gives the same answer and the same noise info as two.
+
+    ``_noise_info`` then ``evaluate`` is what a caller who wants to report the
+    noise alongside the answer has to write, and it compiles the query twice.
+    This gives both from one compilation -- and, more to the point, from one
+    measurement, so the noise reported is necessarily the noise the answer
+    carries.
+    """
+    query = QueryBuilder("t").groupby(A_KEYS).count()
+    session = _session(RhoZCDPBudget(INF))
+    # pylint: disable=protected-access
+    answer, info = session._evaluate_with_noise_info(query, RhoZCDPBudget(INF))
+
+    reference = _session(RhoZCDPBudget(INF))
+    assert info == reference._noise_info(query, RhoZCDPBudget(INF))
+    _assert_answer(
+        answer, reference.evaluate(query, RhoZCDPBudget(INF)), list(A_KEYS.columns())
+    )
+
+
+def test_evaluate_with_noise_info_spends_the_budget_once():
+    """Answering and describing in one call costs one answer's worth of budget."""
+    session = _session(PureDPBudget(2))
+    query = QueryBuilder("t").groupby(A_KEYS).count()
+    # pylint: disable=protected-access
+    session._evaluate_with_noise_info(query, PureDPBudget(1))
+    assert session.remaining_privacy_budget == PureDPBudget(1)
+
+
 def test_evaluating_twice_spends_the_budget_twice():
     """The accountant behind a pandas Session is the real one.
 
