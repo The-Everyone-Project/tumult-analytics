@@ -270,8 +270,15 @@ check_untyped_defs = true
 # existing test files. Delete both the comments and this override together, or
 # add `pandas-stubs` to the mypy session, which would make the union strict
 # again and the comments necessary again.
+#
+# NOTE (a7): this block was landed without the setting it exists for -- the
+# `warn_unused_ignores = false` it describes ended up on the *next* override,
+# for test_mixins -- so `nox -t lint` has been failing on those two lines ever
+# since. Restored here rather than in the test file, which the branch that
+# widened the annotation was also not allowed to touch.
 [[tool.mypy.overrides]]
 module = "test.unit.test_neighboring_relations"
+warn_unused_ignores = false
 
 # pandas ships no py.typed marker, so `pandas.DataFrame` is `Any` to mypy, and a
 # parameter annotated `Union[pyspark.sql.DataFrame, pandas.DataFrame]` -- which
