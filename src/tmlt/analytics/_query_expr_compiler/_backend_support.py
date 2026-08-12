@@ -121,9 +121,15 @@ REQUIRED_OPS: Dict[Type[QueryExpr], Feature] = {
     FlatMapByID: Feature(
         "QueryBuilder.flat_map_by_id()", ("FlatMapByKey", "RowsToRowsTransformation")
     ),
-    JoinPrivate: Feature(
-        "QueryBuilder.join_private()", ("PrivateJoin", "TruncationStrategy")
-    ),
+    # A private join compiles down one of two paths, and only one of them
+    # exists for any given pair of tables: tables with an AddRowsWithID
+    # protected change join through PrivateJoinOnKey, and every other pair
+    # through PrivateJoin. Listing either here would reject a backend that has
+    # the other -- exactly the "lists too many slots" failure described above --
+    # so both are left to the visitor's require(). What every private join needs
+    # whichever path it takes is the truncation-strategy enum, which the visitor
+    # reads before it picks a path.
+    JoinPrivate: Feature("QueryBuilder.join_private()", ("TruncationStrategy",)),
     JoinPublic: Feature("QueryBuilder.join_public()", ("PublicJoin",)),
     ReplaceNullAndNan: Feature(
         "QueryBuilder.replace_null_and_nan()", ("ReplaceNulls", "ReplaceNaNs")

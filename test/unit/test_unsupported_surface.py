@@ -25,8 +25,8 @@ distinguishes a Spark-free code path from a Spark-using one.
 
 import inspect
 import sys
-from dataclasses import dataclass
-from typing import Any, Callable, Iterator, List, Set
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set
 
 import pandas as pd
 import pytest
@@ -35,20 +35,29 @@ from pyspark.sql import SparkSession
 from tmlt.analytics import (
     AddOneRow,
     AddRowsWithID,
+    ApproxDPBudget,
+    ColumnType,
     KeySet,
+    MaxGroupsPerID,
+    MaxRowsPerGroupPerID,
+    MaxRowsPerID,
     PureDPBudget,
     QueryBuilder,
     Session,
+    TruncationStrategy,
 )
 from tmlt.analytics._backends import (
     FEATURE_MATRIX_HINT,
     PANDAS,
     SPARK,
+    Backend,
     NotSupportedByBackend,
 )
 from tmlt.analytics._query_expr import QueryExpr
 from tmlt.analytics._query_expr_compiler._backend_support import (
     REQUIRED_OPS,
+    _children,
+    _required_features,
     check_supported,
     unsupported_features,
 )
@@ -532,3 +541,560 @@ def test_pandas_is_missing_the_features_it_should_be():
     if not _COUNT_FACTORY_BOUND:
         expected |= {"GroupByCount", "GroupByCountDistinct"}
     assert set(unsupported_features(PANDAS)) == expected
+
+
+###############################################################################
+# The table against the visitors.
+###############################################################################
+#
+# REQUIRED_OPS is a second statement of something the visitors already say: the
+# visitor asks for an ops slot by calling backend.require(), and the table says
+# in advance which slots a query of that type will ask for. Two statements of
+# one fact drift, and the drift is invisible for any op both backends bind --
+# which today is most of them. What follows compiles one small query per table
+# row and records what require() was actually asked for, so that the two are
+# checked against each other rather than only against the backends that happen
+# to exist.
+#
+# Drift in the two directions is not equally bad, and is not checked the same
+# way. A row that lists an op the compile never asks for would reject a query
+# the backend could have answered -- the failure the module docstring of
+# _backend_support says the table must not have -- so that is an assertion. A
+# row that omits one the compile does ask for merely delays the rejection to
+# the require() call, which is still compile time and still costs no budget; it
+# is checked against a named list, so that an omission is a decision on record
+# rather than an oversight.
+
+
+@dataclass(frozen=True)
+class _GateCase:
+    """One query, as a probe of what compiling its shape really requires."""
+
+    id: str
+    """The name this case is reported under."""
+
+    build: Callable[[], Any]
+    """Builds the query, once the feature flags are open."""
+
+    approx_dp: bool = False
+    """Whether this query needs the ApproxDP Session rather than the PureDP one."""
+
+    evaluate: bool = False
+    """Whether the ops have to be recorded from an evaluation rather than a compile.
+
+    Automatic partition selection is the one feature whose Core objects are
+    built inside the adaptive composition's callback (``perform_groupby_agg`` in
+    the base measurement visitor), which does not run until the measurement
+    does. Compiling such a query asks for none of them; evaluating it asks for
+    all of them.
+    """
+
+
+def _map_fn(row):  # pragma: no cover -- shape only; the answers are discarded.
+    """A map function returning one new column."""
+    return {"D": 1}
+
+
+def _flat_map_fn(row):  # pragma: no cover -- as above.
+    """A flat-map function returning one row."""
+    return [{"D": 1}]
+
+
+def _flat_map_by_id_fn(rows):  # pragma: no cover -- as above.
+    """A flat-map-by-id function returning one row per ID."""
+    return [{"D": 1}]
+
+
+_GATE_CASES: List[_GateCase] = [
+    # Reading a table, and the transformations, each in both shapes: a query on
+    # a plain table compiles through the DictMetric path, and the same query on
+    # an AddRowsWithID table through the AddRemoveKeys path, which reaches the
+    # *Value member of the same op family. Both shapes matter, because a row
+    # that named an op only one of the two paths uses would be over-listing for
+    # the other -- which is exactly what REQUIRED_OPS[JoinPrivate] used to do.
+    _GateCase("private_source", lambda: QueryBuilder("t").groupby(_KEYS).count()),
+    _GateCase(
+        "private_source_ark",
+        lambda: QueryBuilder("ids").enforce(MaxRowsPerID(2)).groupby(_KEYS).count(),
+    ),
+    _GateCase(
+        "rename", lambda: QueryBuilder("t").rename({"B": "B2"}).groupby(_KEYS).count()
+    ),
+    _GateCase(
+        "rename_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .rename({"B": "B2"})
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "filter", lambda: QueryBuilder("t").filter("B > 1").groupby(_KEYS).count()
+    ),
+    _GateCase(
+        "filter_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .filter("B > 1")
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "select", lambda: QueryBuilder("t").select(["A", "B"]).groupby(_KEYS).count()
+    ),
+    _GateCase(
+        "select_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .select(["A", "id"])
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "map",
+        lambda: (
+            QueryBuilder("t")
+            .map(_map_fn, {"D": ColumnType.INTEGER}, augment=True)
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "map_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .map(_map_fn, {"D": ColumnType.INTEGER}, augment=True)
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "flat_map",
+        lambda: (
+            QueryBuilder("t")
+            .flat_map(_flat_map_fn, {"D": "INTEGER"}, augment=True, max_rows=1)
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "flat_map_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .flat_map(_flat_map_fn, {"D": "INTEGER"}, augment=True)
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    # flat_map_by_id has only the one shape: it is defined on ID tables alone.
+    _GateCase(
+        "flat_map_by_id",
+        lambda: (
+            QueryBuilder("ids")
+            .flat_map_by_id(_flat_map_by_id_fn, {"D": "INTEGER"})
+            .enforce(MaxRowsPerID(2))
+            .count()
+        ),
+    ),
+    _GateCase(
+        "join_private",
+        lambda: (
+            QueryBuilder("t")
+            .join_private(
+                QueryBuilder("t2"),
+                truncation_strategy_left=TruncationStrategy.DropExcess(1),
+                truncation_strategy_right=TruncationStrategy.DropExcess(1),
+            )
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "join_private_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .join_private(QueryBuilder("ids2"))
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "join_public",
+        lambda: QueryBuilder("t").join_public("pub").groupby(_KEYS).count(),
+    ),
+    _GateCase(
+        "join_public_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .join_public("pub")
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "replace_null_and_nan",
+        lambda: QueryBuilder("t").replace_null_and_nan().groupby(_KEYS).count(),
+    ),
+    _GateCase(
+        "replace_null_and_nan_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .replace_null_and_nan()
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "replace_infinity",
+        lambda: (
+            QueryBuilder("t")
+            .replace_infinity({"C": (-1.0, 1.0)})
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "replace_infinity_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .replace_infinity({"C": (-1.0, 1.0)})
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "drop_null_and_nan",
+        lambda: QueryBuilder("t").drop_null_and_nan(["C"]).groupby(_KEYS).count(),
+    ),
+    _GateCase(
+        "drop_null_and_nan_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .drop_null_and_nan(["C"])
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    _GateCase(
+        "drop_infinity",
+        lambda: QueryBuilder("t").drop_infinity(["C"]).groupby(_KEYS).count(),
+    ),
+    _GateCase(
+        "drop_infinity_ark",
+        lambda: (
+            QueryBuilder("ids")
+            .drop_infinity(["C"])
+            .enforce(MaxRowsPerID(2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    # The three ID truncations, which are what an EnforceConstraint builds.
+    _GateCase(
+        "enforce_max_rows_per_id",
+        lambda: QueryBuilder("ids").enforce(MaxRowsPerID(2)).groupby(_KEYS).count(),
+    ),
+    _GateCase(
+        "enforce_max_groups_per_id",
+        lambda: (
+            QueryBuilder("ids")
+            .enforce(MaxGroupsPerID("A", 2))
+            .enforce(MaxRowsPerGroupPerID("A", 2))
+            .groupby(_KEYS)
+            .count()
+        ),
+    ),
+    # The aggregations.
+    _GateCase("count", lambda: QueryBuilder("t").groupby(_KEYS).count()),
+    _GateCase(
+        "count_distinct", lambda: QueryBuilder("t").groupby(_KEYS).count_distinct()
+    ),
+    _GateCase("sum", lambda: QueryBuilder("t").groupby(_KEYS).sum("B", low=0, high=10)),
+    _GateCase(
+        "average", lambda: QueryBuilder("t").groupby(_KEYS).average("B", low=0, high=10)
+    ),
+    _GateCase(
+        "variance",
+        lambda: QueryBuilder("t").groupby(_KEYS).variance("B", low=0, high=10),
+    ),
+    _GateCase(
+        "stdev", lambda: QueryBuilder("t").groupby(_KEYS).stdev("B", low=0, high=10)
+    ),
+    _GateCase(
+        "quantile",
+        lambda: QueryBuilder("t").groupby(_KEYS).quantile("B", 0.5, low=0, high=10),
+    ),
+    _GateCase("get_bounds", lambda: QueryBuilder("t").groupby(_KEYS).get_bounds("B")),
+    _GateCase(
+        "get_groups", lambda: QueryBuilder("t").get_groups(["A"]), approx_dp=True
+    ),
+    _GateCase(
+        "automatic_partition_selection",
+        lambda: QueryBuilder("t").groupby(["A"]).count(),
+        approx_dp=True,
+        evaluate=True,
+    ),
+    _GateCase("suppress", lambda: QueryBuilder("t").groupby(_KEYS).count().suppress(5)),
+]
+"""One query per table row, in each shape that row compiles through."""
+
+_CONDITIONAL_OPS = {
+    # The two private-join paths. Which one a join takes is decided by the
+    # tables' protected change, so neither is needed by every private join; see
+    # REQUIRED_OPS[JoinPrivate].
+    "PrivateJoin",
+    "PrivateJoinOnKey",
+    # The ID truncations. EnforceConstraint's row is empty because the
+    # constraint, not the query expression, builds the truncation -- and which
+    # truncation depends on which constraint.
+    "LimitRowsPerGroup",
+    "LimitRowsPerGroupValue",
+    "LimitKeysPerGroup",
+    "LimitKeysPerGroupValue",
+    "LimitRowsPerKeyPerGroup",
+    "LimitRowsPerKeyPerGroupValue",
+    # A numeric aggregation drops nulls from its measure column first, but only
+    # when that column is nullable -- which the gate, which sees a query and not
+    # a schema, cannot know.
+    "DropNulls",
+    "DropNullsValue",
+}
+"""Ops a compile may ask for that the table does not name, and why.
+
+Every one of these is conditional on something the gate deliberately does not
+look at: the tables' protected change, or a column's nullability. Listing them
+here is what keeps "the table omits this on purpose" distinct from "the table
+forgot this", which is the failure the check below would otherwise be blind to.
+"""
+
+
+def _value_twin(op: str) -> Optional[str]:
+    """The ``*Value`` member of an op's family, if it has one.
+
+    Most transformations exist twice in :class:`~tmlt.analytics._backends.Ops`:
+    ``Select`` transforms a table, and ``SelectValue`` transforms the table
+    inside an AddRemoveKeys dictionary. They are one operation as far as
+    REQUIRED_OPS is concerned -- the table names the family, and which member a
+    query reaches depends on the protected change of the table it runs on, which
+    the gate does not look at (see the module docstring of ``_backend_support``).
+    That is sound only because no backend has one member without the other,
+    which :func:`test_value_twins_are_bound_together` pins.
+    """
+    twin = f"{op}Value"
+    # pylint: disable=protected-access
+    return twin if twin in type(SPARK.ops)._fields else None
+
+
+def _walk(expr: QueryExpr) -> Iterator[QueryExpr]:
+    """Every node of a query tree, the gate's own walk."""
+    # pylint: disable=protected-access
+    yield expr
+    for child in _children(expr):
+        yield from _walk(child)
+
+
+def _features_of(query: Any) -> Set[str]:
+    """Every ops slot REQUIRED_OPS says this whole query needs.
+
+    Read through the gate's own :func:`_required_features`, so that a feature
+    the gate attributes to a node -- automatic partition selection, which
+    belongs to no query expression type of its own -- is counted here too.
+    """
+    # pylint: disable=protected-access
+    ops: Set[str] = set()
+    for node in _walk(query._query_expr):
+        for _, feature in _required_features(node):
+            ops |= set(feature.ops)
+    return ops
+
+
+@pytest.fixture(name="gate_tables", scope="module")
+def fixture_gate_tables(spark) -> Dict[str, Any]:
+    """The Spark tables the probe queries run on."""
+    return {
+        "t": spark.createDataFrame(_DATA),
+        "t2": spark.createDataFrame(pd.DataFrame({"A": ["a", "b"], "D": [1, 2]})),
+        "ids": spark.createDataFrame(_DATA),
+        "ids2": spark.createDataFrame(
+            pd.DataFrame({"id": ["x", "y"], "A": ["a", "b"], "E": [1, 2]})
+        ),
+        "pub": spark.createDataFrame(pd.DataFrame({"A": ["a", "b"], "F": [7, 8]})),
+    }
+
+
+def _gate_session(tables: Dict[str, Any], budget) -> Session:
+    """A Spark Session holding every table the probe queries name."""
+    return (
+        Session.Builder()
+        .with_privacy_budget(budget)
+        .with_id_space("space")
+        .with_private_dataframe("t", tables["t"], AddOneRow())
+        .with_private_dataframe("t2", tables["t2"], AddOneRow())
+        .with_private_dataframe("ids", tables["ids"], AddRowsWithID("id", "space"))
+        .with_private_dataframe("ids2", tables["ids2"], AddRowsWithID("id", "space"))
+        .with_public_dataframe("pub", tables["pub"])
+        .build()
+    )
+
+
+@pytest.fixture(name="required_ops", scope="module")
+def fixture_required_ops(gate_tables) -> Dict[str, Set[str]]:
+    """What each probe query's compile actually asks ``require()`` for.
+
+    Computed once for every case, rather than per test, because it is the
+    expensive half: two Sessions and one compile each. ``Backend.require`` is
+    the single funnel every construction site in the compiler goes through --
+    that is the property the whole gate rests on -- so recording calls to it
+    records exactly the set the gate is trying to predict.
+    """
+    pure_dp = _gate_session(gate_tables, PureDPBudget(1000))
+    approx_dp = _gate_session(gate_tables, ApproxDPBudget(1000, 0.1))
+    recorded: Dict[str, Set[str]] = {}
+    original = Backend.require
+    for case in _GATE_CASES:
+        seen: Set[str] = set()
+
+        def spy(self, op_name: str, _seen: Set[str] = seen) -> Any:
+            _seen.add(op_name)
+            return original(self, op_name)
+
+        session = approx_dp if case.approx_dp else pure_dp
+        budget = ApproxDPBudget(1, 1e-6) if case.approx_dp else PureDPBudget(1)
+        query = case.build()
+        Backend.require = spy  # type: ignore[method-assign]
+        try:
+            if case.evaluate:
+                session.evaluate(query, budget)
+            else:
+                # pylint: disable=protected-access
+                session._compile_and_get_info(query._query_expr, budget)
+        finally:
+            Backend.require = original  # type: ignore[method-assign]
+        recorded[case.id] = seen
+    return recorded
+
+
+@pytest.mark.parametrize("case", _GATE_CASES, ids=[c.id for c in _GATE_CASES])
+def test_the_table_lists_only_ops_the_compiler_asks_for(
+    required_ops: Dict[str, Set[str]], case: _GateCase
+):
+    """Every op the table demands for this query, the compiler really needs.
+
+    This is the direction that has to hold: an op listed but never asked for
+    means the gate refuses a query on a backend that could have answered it. It
+    is also the direction no backend catches, since a slot both backends bind is
+    never missing at the point where it would show.
+
+    An op counts as needed if either member of its family was asked for -- see
+    :func:`_value_twin`.
+    """
+    recorded = required_ops[case.id]
+    query = case.build()
+    for op in _features_of(query):
+        twin = _value_twin(op)
+        assert op in recorded or (twin is not None and twin in recorded), (
+            f"REQUIRED_OPS demands '{op}' for this query, but compiling it never"
+            f" asked for it (or for {twin}). The table over-lists: a backend"
+            f" without '{op}' would be refused a query it could answer. Asked"
+            f" for: {sorted(recorded)}."
+        )
+
+
+@pytest.mark.parametrize("case", _GATE_CASES, ids=[c.id for c in _GATE_CASES])
+def test_the_table_accounts_for_every_op_the_compiler_asks_for(
+    required_ops: Dict[str, Set[str]], case: _GateCase
+):
+    """Nothing the compiler needs is missing from the table by accident.
+
+    An op the table does not name is not a correctness problem -- the query
+    still fails at ``require()``, at compile time, having spent nothing -- but
+    it is a later and vaguer failure than the gate's, so each omission has to be
+    a decision. :data:`_CONDITIONAL_OPS` is where those decisions are written
+    down; anything else reaching here is one nobody made.
+    """
+    query = case.build()
+    listed = _features_of(query)
+    accounted = set(listed)
+    for op in listed:
+        twin = _value_twin(op)
+        if twin is not None:
+            accounted.add(twin)
+    unaccounted = required_ops[case.id] - accounted - _CONDITIONAL_OPS
+    assert not unaccounted, (
+        f"Compiling this query asked for {sorted(unaccounted)}, which no"
+        " REQUIRED_OPS row names and _CONDITIONAL_OPS does not excuse. Add the"
+        " op to the row if every query of that type needs it, or to"
+        " _CONDITIONAL_OPS -- with a reason -- if it depends on something the"
+        " gate does not look at."
+    )
+
+
+@pytest.mark.parametrize("case", _GATE_CASES, ids=[c.id for c in _GATE_CASES])
+def test_the_gate_rejects_on_every_op_it_lists(case: _GateCase):
+    """Removing any one listed op is enough for the gate to refuse the query.
+
+    The other half of the agreement: the test above says the compiler needs
+    every op the table lists, and this says the gate acts on every op the table
+    lists. A row could otherwise name an op that nothing ever reads.
+
+    Nothing is compiled here -- a backend with a hole in it is handed straight
+    to the gate -- so this half needs no Spark.
+    """
+    # pylint: disable=protected-access
+    query = case.build()
+    for op in _features_of(query):
+        backend = replace(SPARK, ops=SPARK.ops._replace(**{op: None}))
+        with pytest.raises(NotSupportedByBackend) as excinfo:
+            check_supported(query._query_expr, backend)
+        assert op in str(excinfo.value)
+
+
+def test_every_table_row_has_a_probe_query():
+    """Every row of the table is exercised by one of the cases above.
+
+    A row nothing probes is a row the checks above say nothing about, which
+    would make them quietly weaker as the query language grows.
+    """
+    covered: Set[type] = set()
+    for case in _GATE_CASES:
+        # pylint: disable=protected-access
+        covered |= {type(node) for node in _walk(case.build()._query_expr)}
+    assert covered == set(REQUIRED_OPS)
+
+
+def test_value_twins_are_bound_together():
+    """No backend has one member of an op family without the other.
+
+    :func:`_value_twin` treats ``Select`` and ``SelectValue`` as one requirement,
+    which is only sound while this holds. If a backend ever binds one without
+    the other, the table has to name both members explicitly instead.
+    """
+    # pylint: disable=protected-access
+    for backend in (SPARK, PANDAS):
+        for op in type(backend.ops)._fields:
+            twin = _value_twin(op)
+            if twin is None:
+                continue
+            assert (getattr(backend.ops, op) is None) == (
+                getattr(backend.ops, twin) is None
+            ), f"{backend.name} binds exactly one of {op} and {twin}"
+
+
+def test_every_conditional_op_is_a_real_slot():
+    """The named exceptions name ops that exist."""
+    # pylint: disable=protected-access
+    unknown = _CONDITIONAL_OPS - set(type(SPARK.ops)._fields)
+    assert not unknown, f"_CONDITIONAL_OPS names unknown ops {unknown}"
