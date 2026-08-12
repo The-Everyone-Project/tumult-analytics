@@ -48,6 +48,12 @@ NOJVM_TEST_PATHS = [
     CWD / "test" / "unit" / "test_session_pandas.py",
     CWD / "test" / "unit" / "test_coerce_pandas_schema.py",
     CWD / "test" / "unit" / "test_pandas_schema_conversion.py",
+    # KeySet materialization. Half of this file compares the pandas frame against
+    # the Spark one, and half asks only about the pandas frame. The comparisons
+    # carry the `spark` marker written by hand: they reach Spark through
+    # KeySet.dataframe() inside the test body, where the collection hook -- which
+    # reads fixture closures -- cannot see it.
+    CWD / "test" / "unit" / "keysets" / "test_pandas_materialization.py",
     # The parity harness's self-tests, and the demonstration a parity suite is
     # copied from. Core's lane includes its own harness self-tests for the same
     # reason: the harness is what every test above is written against, so a lane
@@ -58,14 +64,7 @@ NOJVM_TEST_PATHS = [
 """Test paths the test-nojvm session runs.
 
 Every path here has been checked to pass with ``TMLT_FORBID_JVM=1`` and
-``-m "not spark"``. One pandas suite is deliberately *absent*:
-``test/unit/keysets/test_pandas_materialization.py``. It compares a KeySet
-materialized on pandas against the same KeySet materialized on Spark, and it
-reaches Spark through ``KeySet.dataframe()`` inside the test body rather than by
-requesting the ``spark`` fixture -- so the collection hook in test/conftest.py
-cannot see that it needs a JVM, and 56 of its tests boot one. Adding it would
-need those tests to request the fixture or carry the marker; until then it is
-excluded by path rather than allowed to fail the lane.
+``-m "not spark"``.
 """
 
 

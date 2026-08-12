@@ -12,6 +12,17 @@ become indistinguishable; and a pandas frame spells a null three ways
 (``None``, ``pd.NA``, ``float("nan")``), only two of which mean "null". Both
 sides are therefore reduced to a multiset of rows of tagged Python values by
 :func:`_rows`, which keeps a null and a NaN apart, before being compared.
+
+Half of this module is such a comparison, and so needs a Spark session; the other
+half asks only about the pandas frame. The comparisons carry ``@pytest.mark.spark``
+so that the ``test-nojvm`` nox session can deselect them and run the pandas half of
+the file. The marker is written by hand here rather than left to the collection
+hook in ``test/conftest.py``, which infers it from the ``spark`` fixture: these
+tests reach Spark through ``KeySet.dataframe()`` inside the test body, which no
+fixture closure shows. Two of them -- :func:`test_size_matches` and
+:func:`test_is_empty_matches` -- are marked as a whole although a few of their
+corpus cases answer without Spark, because per-case marking would mean marks on a
+corpus that five tests share.
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -191,6 +202,7 @@ def _corpus() -> list[Case]:
 
 
 @parametrize(_corpus())
+@pytest.mark.spark
 def test_same_keys_on_both_backends(keyset: KeySet) -> None:
     """Every KeySet in the corpus holds the same keys on both backends."""
     assert_same_keys(keyset)
@@ -211,6 +223,7 @@ def test_dtypes_match_schema(keyset: KeySet) -> None:
 
 
 @parametrize(_corpus())
+@pytest.mark.spark
 def test_size_matches(keyset: KeySet) -> None:
     """A KeySet's size is the same computed on either backend."""
     spark_size = KeySet(keyset._op_tree, keyset.columns()).size(SPARK)
@@ -221,6 +234,7 @@ def test_size_matches(keyset: KeySet) -> None:
 
 
 @parametrize(_corpus())
+@pytest.mark.spark
 def test_is_empty_matches(keyset: KeySet) -> None:
     """Whether an op-tree is empty is the same answer on either backend."""
     assert keyset._op_tree.is_empty(PANDAS) == keyset._op_tree.is_empty(SPARK)
@@ -255,6 +269,7 @@ def test_corpus_covers_every_materializable_op() -> None:
 ################################################################################
 
 
+@pytest.mark.spark
 def test_total_aggregation_shape() -> None:
     """A KeySet with no columns materializes to an empty frame on both backends.
 
@@ -311,6 +326,7 @@ def test_cross_join_of_total_aggregations() -> None:
     Case("null_integer")(values=[(1,), (None,)], column="A"),
     Case("null_date")(values=[(_DATE,), (None,)], column="A"),
 )
+@pytest.mark.spark
 def test_null_survives_materialization(values: list[tuple], column: str) -> None:
     """A null key is a null in the pandas frame, not a NaN and not dropped."""
     keyset = KeySet.from_tuples(values, columns=[column])
@@ -332,6 +348,7 @@ def test_null_and_nan_are_distinguished_by_the_comparison() -> None:
     assert _rows(null_frame, ["A"]) != _rows(nan_frame, ["A"])
 
 
+@pytest.mark.spark
 def test_join_on_null_keys_matches_them() -> None:
     """Nulls join to each other, as they do on Spark, rather than being dropped."""
     left = KeySet.from_tuples([("a1", 1), (None, 2)], columns=["A", "B"])
@@ -343,6 +360,7 @@ def test_join_on_null_keys_matches_them() -> None:
     assert_same_keys(joined)
 
 
+@pytest.mark.spark
 def test_subtract_removes_null_keys() -> None:
     """A null on the right of a subtraction removes the null row on the left."""
     left = KeySet.from_tuples([("a1",), ("a2",), (None,)], columns=["A"])
@@ -351,6 +369,7 @@ def test_subtract_removes_null_keys() -> None:
     assert_same_keys(result)
 
 
+@pytest.mark.spark
 def test_nullable_join_column_is_cast_back() -> None:
     """A join column both sides forbid nulls in comes back non-nullable.
 
@@ -369,6 +388,7 @@ def test_nullable_join_column_is_cast_back() -> None:
     assert_same_keys(joined)
 
 
+@pytest.mark.spark
 def test_large_integers_are_not_rounded() -> None:
     """An integer key too large for a float survives the pandas materialization.
 
@@ -387,6 +407,7 @@ def test_large_integers_are_not_rounded() -> None:
 ################################################################################
 
 
+@pytest.mark.spark
 def test_from_pandas_deduplicates() -> None:
     """Duplicate rows in the given frame become one key."""
     keyset = KeySet.from_pandas(pd.DataFrame({"A": ["a1", "a1", "a2"], "B": [1, 1, 2]}))
@@ -409,6 +430,7 @@ def test_from_pandas_copies_the_frame() -> None:
     assert sorted(keyset.to_pandas()["A"]) == ["a1", "a2"]
 
 
+@pytest.mark.spark
 def test_from_pandas_widens_narrow_dtypes() -> None:
     """A narrow input dtype is coerced to the one Analytics uses."""
     keyset = KeySet.from_pandas(pd.DataFrame({"A": np.array([5, 6], dtype="int32")}))
@@ -430,6 +452,7 @@ def test_from_pandas_zero_columns_is_a_total_aggregation() -> None:
     assert keyset.to_pandas().shape == (0, 0)
 
 
+@pytest.mark.spark
 def test_from_pandas_equals_the_same_keys_from_tuples() -> None:
     """A KeySet built from a frame equals one built from the same tuples."""
     frame = pd.DataFrame(
@@ -459,6 +482,7 @@ def test_from_pandas_op_equality_is_conservative() -> None:
 ################################################################################
 
 
+@pytest.mark.spark
 def test_materialized_frames_are_cached_per_backend() -> None:
     """Each backend's frame is built once, and neither displaces the other."""
     keyset = KeySet.from_tuples([("a1",), ("a2",)], columns=["A"])
@@ -470,6 +494,7 @@ def test_materialized_frames_are_cached_per_backend() -> None:
     assert keyset.dataframe() is spark_frame
 
 
+@pytest.mark.spark
 def test_cache_does_not_disturb_the_pandas_frame() -> None:
     """cache() and uncache() are Spark's, and leave the pandas frame alone."""
     keyset = KeySet.from_tuples([("a1",), ("a2",)], columns=["A"])
@@ -484,6 +509,7 @@ def test_cache_does_not_disturb_the_pandas_frame() -> None:
     assert keyset.dataframe().is_cached is False
 
 
+@pytest.mark.spark
 def test_cache_before_materializing_still_caches_spark() -> None:
     """A KeySet cached before either frame exists still caches the Spark one."""
     keyset = KeySet.from_tuples([("a1",), ("a2",)], columns=["A"])
@@ -578,6 +604,7 @@ def test_frame_kind_rejects_other_backends() -> None:
         frame_kind(NEITHER)
 
 
+@pytest.mark.spark
 def test_dataframe_defaults_to_spark() -> None:
     """Saying nothing about a backend gets a Spark dataframe, as it always did."""
     keyset = KeySet.from_tuples([("a1",)], columns=["A"])
@@ -585,6 +612,7 @@ def test_dataframe_defaults_to_spark() -> None:
     assert isinstance(keyset._op_tree.dataframe(), DataFrame)
 
 
+@pytest.mark.spark
 def test_op_dataframe_takes_a_backend() -> None:
     """An op-tree materializes on whichever backend it is handed."""
     keyset = KeySet.from_tuples([("a1",)], columns=["A"])
