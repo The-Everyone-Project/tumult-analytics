@@ -962,16 +962,59 @@ class Session:
 
     @property
     def _catalog(self) -> Catalog:
-        """Returns a Catalog of tables in the Session."""
+        """Returns a Catalog of tables in the Session.
+
+        Built from one walk of the input domain. The four public accessors --
+        :meth:`get_schema`, :meth:`get_grouping_column`, :meth:`get_id_column`
+        and :meth:`get_id_space` -- answer the same four questions, and the
+        catalog used to be assembled by calling them; but each of them starts
+        by searching the whole domain for the table again, and each is
+        ``@typechecked``, so a Session with N tables did 4N searches and 4N
+        runtime type checks to describe N tables. Every entry point into
+        compilation builds a catalog, so that cost is paid per query. The
+        accessors remain the API; this just stops routing through them.
+
+        The two do produce the same catalog: the loop below is what the four of
+        them do, with the search hoisted out and shared.
+        """
         catalog = Catalog()
-        for table in self.private_sources:
+        domain = self._input_domain
+        metric = self._input_metric
+        for ref in find_named_tables(domain):
+            identifier = ref.identifier
+            if not isinstance(identifier, NamedTable):
+                raise AnalyticsInternalError(
+                    f"Expected a named table but got {identifier} instead."
+                )
+            name = identifier.name
+            # get_grouping_column and get_id_column, which read the same metric
+            # and are distinguished only by what it is grouped by.
+            grouping_column: Optional[str] = None
+            id_column: Optional[str] = None
+            table_metric = lookup_metric(metric, ref)
+            if isinstance(table_metric, IfGroupedBy):
+                if isinstance(table_metric.inner_metric, (SumOf, RootSumOfSquared)):
+                    grouping_column = list(table_metric.columns)[0]
+                elif isinstance(table_metric.inner_metric, SymmetricDifference):
+                    id_column = list(table_metric.columns)[0]
+            # get_id_space. Tables not in an ID space have a parent of ([]);
+            # otherwise the parent is the TableCollection naming the space.
+            id_space: Optional[str] = None
+            if ref.parent != TableReference([]):
+                parent_identifier = ref.parent.identifier
+                if not isinstance(parent_identifier, TableCollection):
+                    raise AnalyticsInternalError(
+                        "Expected parent to be a table collection but got"
+                        f" {parent_identifier} instead."
+                    )
+                id_space = parent_identifier.name
             catalog.add_private_table(
-                table,
-                self.get_schema(table),
-                constraints=self._table_constraints[NamedTable(table)],
-                grouping_column=self.get_grouping_column(table),
-                id_column=self.get_id_column(table),
-                id_space=self.get_id_space(table),
+                name,
+                self._backend.domain_to_analytics_columns(lookup_domain(domain, ref)),
+                constraints=self._table_constraints[NamedTable(name)],
+                grouping_column=grouping_column,
+                id_column=id_column,
+                id_space=id_space,
             )
         for table in self.public_sources:
             catalog.add_public_table(
