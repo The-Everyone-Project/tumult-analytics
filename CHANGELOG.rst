@@ -11,10 +11,41 @@ Changelog
 Unreleased
 ----------
 
+..
+    NOTE (The-Everyone-Project fork): everything in this section is the fork's
+    pandas backend work, and is what the 0.21.0+ep.backend.1 build carries. It is
+    not an upstream Tumult Analytics release, and is never published to PyPI. The
+    heading stays "Unreleased" because renaming it is a step of upstream's release
+    machinery, which a fork release does not run; see RELEASING-ep-backend.md.
+
+This release adds an experimental **pandas backend**: a :class:`~tmlt.analytics.Session` can be built from pandas dataframes rather than Spark ones, and answers a subset of the query surface entirely in memory -- no JVM, no cluster, and answers returned as pandas dataframes.
+The :ref:`backends topic guide<backends>` describes how a backend is chosen, which queries this one answers, and what it refuses; the feature matrix on that page is generated from the same tables the query compiler enforces.
+
 Added
 ~~~~~
+- A pandas backend, behind the new ``pandas_backend`` :class:`~tmlt.analytics.FeatureFlag`. Nobody names a backend: a :class:`~tmlt.analytics.Session.Builder` handed a pandas dataframe as a private table builds a Session on pandas, and one handed a Spark dataframe builds a Session on Spark exactly as before. All of a Session's tables must be on one backend, because they share one privacy accountant; :meth:`~tmlt.analytics.Session.from_dataframe` remains Spark-only.
+- On the pandas backend, the query surface is reading a table, :meth:`~tmlt.analytics.QueryBuilder.select`, :meth:`~tmlt.analytics.QueryBuilder.rename`, :meth:`~tmlt.analytics.QueryBuilder.map`, :meth:`~tmlt.analytics.QueryBuilder.join_private` with either :class:`~tmlt.analytics.TruncationStrategy`, :meth:`~tmlt.analytics.QueryBuilder.enforce` with any of the row and group constraints, and :meth:`~tmlt.analytics.QueryBuilder.count` and :meth:`~tmlt.analytics.QueryBuilder.count_distinct` -- ungrouped, or grouped by a :class:`~tmlt.analytics.KeySet` -- with :meth:`~tmlt.analytics.GroupbyCountQuery.suppress` on the result. The tables it can hold are those protected by :class:`~tmlt.analytics.AddOneRow`, :class:`~tmlt.analytics.AddMaxRows` or :class:`~tmlt.analytics.AddRowsWithID`.
+- A query that needs something its backend does not have is refused with :exc:`~tmlt.analytics._backends.NotSupportedByBackend`, a :class:`NotImplementedError`, naming the feature, the call that built it, and the operation the backend is missing. The refusal happens before the query is compiled, so nothing is built and no privacy budget is spent on one.
 - :meth:`.KeySet.to_pandas`, which materializes a KeySet's keys as a pandas dataframe rather than a Spark one.
 - :meth:`.KeySet.from_pandas`, the in-memory counterpart of :meth:`.KeySet.from_dataframe`. Unlike that method, it copies the dataframe it is given, and the KeySet it returns can be materialized on either backend.
+- :meth:`.KeySet.dataframe` and :meth:`.KeySet.size` take an optional backend, defaulting to Spark. Every way of building a KeySet materializes on either backend except :meth:`.KeySet.from_dataframe`, which holds a Spark dataframe, and :meth:`.KeySet.filter`, whose condition is a Spark expression.
+- A :ref:`backends topic guide<backends>`, including the feature matrix that every "not supported by this backend" message points at. The matrix is rendered when the documentation is built, from the compiler's own tables, so it cannot come to disagree with the engine.
+- A backend-parity test suite: every query the two backends share is answered on both and compared, its noise distribution gated against the other backend's draws, and every query feature is classified as either supported on both or unsupported on pandas -- again from the compiler's tables, so a feature added later cannot go quietly unclassified.
+- A ``test-nojvm`` nox session, which runs the pandas suites with ``TMLT_FORBID_JVM`` set so that starting a JVM fails the lane. That is what makes "this code path does not need Spark" a checked claim rather than an intention.
+
+Changed
+~~~~~~~
+- The query compiler no longer names Core's Spark classes directly. Every table domain, transformation, measurement factory and schema conversion it builds with is reached through a backend descriptor, which is also where "this backend has no such operation" is decided.
+- :meth:`~tmlt.analytics.Session.evaluate` returns a dataframe of its backend's own kind, so a pandas Session answers with a pandas dataframe rather than one that has to be collected.
+- ``cache=True`` on :meth:`~tmlt.analytics.Session.create_view` is ignored, with a warning, on a backend whose tables are already materialized in memory. Caching is a performance request, and on such a backend there is nothing to cache.
+- Public tables and :meth:`~tmlt.analytics.Session.partition_and_create` remain Spark-only, and are refused rather than accepted on a Session that could not use them. A public table exists to be joined against, and there is no pandas ``join_public`` yet.
+- Nullability of a pandas table is read from its dtypes, which decide it without looking at any value: a column is nullable exactly when its dtype can hold a null. Against a Spark schema inferred from the same frame that is the more precise of the two; against a Spark schema whose string, date or timestamp columns were *declared* non-nullable it is the more permissive, because no pandas dtype for those types can refuse a null.
+- Packaging: the version is the static local version ``0.21.0+ep.backend.1``, and ``tmlt.core`` is the Everyone Project build ``0.19.1+ep.backend.1`` -- resolved from a sibling checkout while developing, and from the published wheel by URL everywhere else. See ``RELEASING-ep-backend.md``.
+
+Fixed
+~~~~~
+- Compiling a group-by materializes its :class:`~tmlt.analytics.KeySet` once rather than three or four times. The measurement visitor read ``keyset.dataframe().columns`` in twelve places to learn column names that :meth:`.KeySet.columns` returns directly, and every one of those reads built the KeySet's dataframe. This is a Spark-side improvement, independent of the new backend.
+- :meth:`~tmlt.analytics.Session.describe` of a query the Session's backend cannot answer reports the refusal, rather than describing the query as though evaluating it would succeed.
 
 .. _v0.21.0:
 

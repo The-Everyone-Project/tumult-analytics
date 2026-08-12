@@ -21,11 +21,13 @@ license = "Apache-2.0"
 # `0.21.0-ep-backend-0`) would break every build and every nox session.
 #
 # A static version sidesteps the whole mechanism. The local segment
-# `+ep.backend.0` sorts after `0.21.0`, satisfies any `>=0.21.0,<0.22`
+# `+ep.backend.1` sorts after `0.21.0`, satisfies any `>=0.21.0,<0.22`
 # constraint, and PyPI structurally rejects local versions, so this build can
 # never be mistaken for -- or shadowed by -- an official upstream release.
-# Bump the trailing N (`+ep.backend.1`, ...) for each fork release.
-version = "0.21.0+ep.backend.0"
+# Bump the trailing N (`+ep.backend.2`, ...) for each fork release; see
+# RELEASING-ep-backend.md. Keep this in step with `[tool.uv-dynamic-versioning]`
+# below, which nox reads.
+version = "0.21.0+ep.backend.1"
 
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -158,8 +160,8 @@ style = "semver"
 # The default configuration expect vX.Y.Z, but we haven't been using the 'v' prefix.
 pattern = "^(?P<base>\\d+\\.\\d+\\.\\d+)(-(?P<stage>[a-zA-Z]+)\\.(?P<revision>\\d+))?"
 commit-length = 8
-format-jinja = "0.21.0+ep.backend.0"
-fallback-version = "0.21.0+ep.backend.0"
+format-jinja = "0.21.0+ep.backend.1"
+fallback-version = "0.21.0+ep.backend.1"
 
 [tool.hatch.build.hooks.version]
 path = "src/tmlt/analytics/_version.py"
