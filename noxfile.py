@@ -5,6 +5,7 @@ nox command line, and https://nox.thea.codes/en/stable/config.html for the nox
 API reference.
 """
 
+import platform
 import sys
 from pathlib import Path
 
@@ -35,6 +36,47 @@ def is_mac():
     return sys.platform == "darwin"
 
 
+# NOTE (The-Everyone-Project fork): the "oldest" cells below used to pin
+# `"tmlt.core": "==0.19.1"`, which resolves the *upstream PyPI* 0.19.1 wheel.
+# That wheel does not contain `tmlt.core.utils.pandas_truncation`, which the
+# pandas backend depends on, so those two matrix cells would install a Core that
+# cannot run this branch's tests.
+#
+# `"==0.19.1+ep.pandas.1"` is not a fix: the fork build is deliberately a PEP 440
+# local version, and PyPI rejects local versions, so there is nothing to resolve
+# against. Instead we point those cells at the published fork wheel as a PEP 508
+# direct reference. tmlt.nox_utils builds each pin by plain string concatenation
+# (`sess.install(pkg + version)`, see nox_utils._session_manager), so a value
+# starting with " @ <url>" produces the valid requirement
+# `tmlt.core @ https://.../tmlt_core-...whl`. This is the least invasive fix that
+# still exercises the real floor version.
+#
+# The fork wheels are `py3-none-<platform>` (pure-Python tag, platform-specific
+# vendored libs), so one URL per platform covers Python 3.10-3.12.
+#
+# TODO: the `>=0.19.1` cells still resolve from PyPI. They are currently
+# harmless -- `uv pip install` keeps the already-installed 0.19.1+ep.pandas.1,
+# which satisfies the constraint -- but if upstream ever publishes a 0.19.x
+# newer than the fork base, those cells will silently upgrade to a Core without
+# the pandas modules. Repoint them at the fork wheel if that happens.
+_EP_CORE_WHEEL_BASE = (
+    "https://github.com/The-Everyone-Project/tumult-core/releases/download/"
+    "0.19.1-ep-pandas-1/tmlt_core-0.19.1+ep.pandas.1-py3-none-"
+)
+
+
+def ep_core_wheel():
+    """Direct-reference pin for the Everyone Project tmlt.core fork build.
+
+    Returned as a `" @ <url>"` suffix so that nox_utils' `pkg + version`
+    concatenation yields a valid PEP 508 requirement.
+    """
+    if is_mac():
+        arch = "arm64" if platform.machine() == "arm64" else "x86_64"
+        return f" @ {_EP_CORE_WHEEL_BASE}macosx_11_0_{arch}.whl"
+    return f" @ {_EP_CORE_WHEEL_BASE}manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+
+
 DEPENDENCY_MATRIX = [
     DependencyConfiguration(
         id="3.10-oldest",
@@ -43,7 +85,7 @@ DEPENDENCY_MATRIX = [
             "pyspark[sql]": "==3.3.1" if not is_mac() else "==3.5.0",
             "sympy": "==1.8",
             "pandas": "==1.4.0",
-            "tmlt.core": "==0.19.1",
+            "tmlt.core": ep_core_wheel(),
         },
     ),
     DependencyConfiguration(
@@ -63,7 +105,7 @@ DEPENDENCY_MATRIX = [
             "pyspark[sql]": "==3.4.0" if not is_mac() else "==3.5.0",
             "sympy": "==1.8",
             "pandas": "==1.5.0",
-            "tmlt.core": "==0.19.1",
+            "tmlt.core": ep_core_wheel(),
         },
     ),
     DependencyConfiguration(

@@ -5,7 +5,27 @@ readme = "README.md"
 authors = []
 license = "Apache-2.0"
 
-dynamic = ["version"]
+# NOTE (The-Everyone-Project fork): this branch pins a static PEP 440 local
+# version instead of deriving it from the git tag.
+#
+#   base = content of the 0.21.0 release plus upstream PR #135 (commit 1d620b0);
+#   versioned 0.21.0+ep.backend.N because uv-dynamic-versioning with
+#   latest-tag=true errors on fork tags and main git-describes as 0.20.2+44.
+#
+# In more detail: `main` is not a descendant of the `0.21.0` tag -- the release
+# was cut on a side branch -- so `git describe` here reports `0.20.2-44-g1d620b0`
+# even though the tree content is 0.21.0 plus one merged PR. Upstream papered
+# over this with `latest-tag = true`, which picks the newest tag by commit date;
+# but uv-dynamic-versioning/dunamai *errors out* when that newest tag does not
+# match `pattern` rather than falling back, so any fork tag we add (e.g.
+# `0.21.0-ep-backend-0`) would break every build and every nox session.
+#
+# A static version sidesteps the whole mechanism. The local segment
+# `+ep.backend.0` sorts after `0.21.0`, satisfies any `>=0.21.0,<0.22`
+# constraint, and PyPI structurally rejects local versions, so this build can
+# never be mistaken for -- or shadowed by -- an official upstream release.
+# Bump the trailing N (`+ep.backend.1`, ...) for each fork release.
+version = "0.21.0+ep.backend.0"
 
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -91,23 +111,55 @@ scripting = [
 # "tmlt.nox_utils" = { path = "../tumult-tools/nox-utils", editable = true }
 "tmlt.nox_utils" = { git = "https://github.com/opendp/tumult-tools.git", subdirectory = "nox-utils" }
 
+# NOTE (The-Everyone-Project fork): DEV-TIME SOURCE ONLY.
+#
+# The pandas backend in this branch is co-developed with the matching Core fork,
+# so the local dev loop resolves `tmlt.core` from a sibling checkout of
+# The-Everyone-Project/tumult-core (branch `release/0.19.1-ep-pandas`, which
+# builds `0.19.1+ep.pandas.1`). The expected layout is two sibling directories:
+#
+#   <parent>/tumult-analytics   <- this repo
+#   <parent>/tumult-core        <- the Core fork
+#
+# If you develop from a `git worktree`, the worktree is not a sibling of
+# tumult-core, so create a symlink next to it that is -- e.g.
+# `ln -s /path/to/tumult-core <worktree-parent>/tumult-core`.
+#
+# CI and downstream consumers do NOT use this path. They install the published
+# fork wheel by URL, e.g. (macOS arm64):
+#   https://github.com/The-Everyone-Project/tumult-core/releases/download/0.19.1-ep-pandas-1/tmlt_core-0.19.1+ep.pandas.1-py3-none-macosx_11_0_arm64.whl
+# See the `[tool.uv.sources]` block in the difference-engine repo for the full
+# platform-marked list, and `noxfile.py` for the dependency-matrix pin.
+"tmlt.core" = { path = "../tumult-core", editable = true }
+
 ################################################################################
 # Build configuration
 
 [build-system]
-requires = ["hatchling", "uv-dynamic-versioning"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.version]
-source = "uv-dynamic-versioning"
-
+# NOTE (The-Everyone-Project fork): `uv-dynamic-versioning` is intentionally
+# dropped from the build requirements and `[tool.hatch.version]` is intentionally
+# removed -- the build no longer derives a version from git, it uses the static
+# `version` in `[project]` above.
+#
+# `[tool.uv-dynamic-versioning]` below is kept only because tmlt.nox_utils reads
+# it (via uv_dynamic_versioning.main.get_version, in nox_utils.package_version)
+# when noxfile.py is imported; without it, every nox session dies with
+# `AttributeError: 'NoneType' object has no attribute 'vcs'`. The constant
+# `format-jinja` makes it report the same version the build produces rather than
+# a tag-derived "0.20.2.post44...", and `fallback-version` covers shallow CI
+# clones where no tag is reachable. `latest-tag` is dropped along with it: it is
+# what makes dunamai error on a non-matching newest tag.
 [tool.uv-dynamic-versioning]
 vcs = "git"
 style = "semver"
 # The default configuration expect vX.Y.Z, but we haven't been using the 'v' prefix.
 pattern = "^(?P<base>\\d+\\.\\d+\\.\\d+)(-(?P<stage>[a-zA-Z]+)\\.(?P<revision>\\d+))?"
 commit-length = 8
-latest-tag = true
+format-jinja = "0.21.0+ep.backend.0"
+fallback-version = "0.21.0+ep.backend.0"
 
 [tool.hatch.build.hooks.version]
 path = "src/tmlt/analytics/_version.py"

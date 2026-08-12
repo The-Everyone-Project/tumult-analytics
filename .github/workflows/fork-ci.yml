@@ -1,0 +1,94 @@
+# Fork CI for The-Everyone-Project/tumult-analytics.
+#
+# Upstream (opendp/tumult-analytics) only runs its real pipeline at merge time
+# via the merge queue, with a dummy PR workflow standing in for the required
+# checks (see dummy_pr.yml). This fork does not use a merge queue, so it needs a
+# pipeline that actually runs on pushes and PRs -- but a cheap one: lint plus the
+# fast test subset, not the full dependency matrix, docs, or benchmarks.
+#
+# The `if:` guard on every job means this file is inert in the upstream repo and
+# in every other fork, so it can be carried on a feature branch without hijacking
+# anyone else's CI minutes.
+name: Fork CI
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'feature/**'
+  pull_request:
+    branches:
+      - 'main'
+      - 'feature/**'
+
+env:
+  # Force nox to produce colorful logs:
+  FORCE_COLOR: "true"
+
+jobs:
+  # tmlt.nox_utils installs the package from a built wheel in dist/ whenever
+  # CI=true, and errors out if one is not there -- hence this job, mirroring
+  # merge_queue.yml.
+  Package:
+    if: github.repository == 'The-Everyone-Project/tumult-analytics'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up runner
+        uses: opendp/tumult-tools/actions/setup@0f3d49599e5824a9f407a6e2063990c1e0d4c2e8
+      # Validate the committed lockfile against the committed pyproject before
+      # the fork-wheel rewrite below invalidates it.
+      - run: uv lock --check
+      - name: Point tmlt.core at the fork wheel
+        run: ./.github/scripts/use_core_fork_wheel.py
+      - run: uv run nox -s build
+      - name: Archive packaged library
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+  Lint:
+    if: github.repository == 'The-Everyone-Project/tumult-analytics'
+    runs-on: ubuntu-latest
+    needs: Package
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up runner
+        uses: opendp/tumult-tools/actions/setup@0f3d49599e5824a9f407a6e2063990c1e0d4c2e8
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Point tmlt.core at the fork wheel
+        run: ./.github/scripts/use_core_fork_wheel.py
+      - run: uv run nox -t lint
+
+  Test:
+    if: github.repository == 'The-Everyone-Project/tumult-analytics'
+    runs-on: ubuntu-latest
+    needs:
+      - Package
+      - Lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up runner
+        uses: opendp/tumult-tools/actions/setup@0f3d49599e5824a9f407a6e2063990c1e0d4c2e8
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Point tmlt.core at the fork wheel
+        run: ./.github/scripts/use_core_fork_wheel.py
+      # GitHub's ubuntu-latest runners ship a JDK, which the Spark-backed tests
+      # need; no extra setup-java step is required.
+      - run: uv run nox -s smoketest test-fast
