@@ -34,12 +34,20 @@ from typing import (
     Tuple,
     Type,
     Union,
+    cast,
 )
 
+import pandas as pd
+from pyspark.sql import DataFrame as SparkDataFrame
 from tmlt.core.domains.base import Domain
 from tmlt.core.domains.spark_domains import SparkDataFrameDomain
 
-from tmlt.analytics._schema import ColumnDescriptor, Schema
+from tmlt.analytics._schema import (
+    ColumnDescriptor,
+    Schema,
+    analytics_to_pandas_columns_descriptor,
+    pandas_dtypes_to_analytics_columns,
+)
 from tmlt.analytics._utils import AnalyticsInternalError
 
 try:
@@ -48,6 +56,8 @@ try:
     _PANDAS_TABLE_DOMAIN_TYPES: Tuple[type, ...] = (PandasTableDomain,)
 except ImportError:  # pragma: no cover
     # A Core without the pandas table domains: the Spark backend still works.
+    # ``pandas_domain_from_dataframe`` below then has no domain type to build
+    # and raises a NameError if called, which only a pandas Backend would do.
     _PANDAS_TABLE_DOMAIN_TYPES = ()
 
 # The annotation is a string so that it is not evaluated at import time, which
@@ -64,6 +74,57 @@ Use this where a guard asks "is this a table domain at all", and the narrow
 domain type where the code that follows reads something only one backend's
 domain has (``SparkDataFrameDomain.spark_schema``, say -- ``.schema`` is common
 to both families by design)."""
+
+AnyDataFrame = Union[SparkDataFrame, pd.DataFrame]
+"""A table in whichever representation its backend carries tables in.
+
+Spelled as a union rather than as :attr:`Backend.dataframe_type` because it is
+used in annotations, which are read before any backend has been chosen. Code
+that has a :class:`Backend` in hand and needs to *check* the type should use
+that attribute.
+
+Note:
+    pandas ships no ``py.typed`` marker, so ``pd.DataFrame`` is ``Any`` to a
+    type checker unless ``pandas-stubs`` is installed, and a union containing
+    it is only as strict as its Spark half. The annotation still says what is
+    meant, and it becomes exact if the stubs are ever added to the mypy
+    session."""
+
+
+def spark_domain_from_dataframe(dataframe: AnyDataFrame) -> Domain:
+    """Build the Spark domain describing a table, from the table itself.
+
+    This is :attr:`Backend.domain_from_dataframe` for the Spark backend. A Spark
+    DataFrame carries its own schema, so the domain follows from it directly.
+    """
+    return SparkDataFrameDomain.from_spark_schema(
+        cast(SparkDataFrame, dataframe).schema
+    )
+
+
+def pandas_domain_from_dataframe(dataframe: AnyDataFrame) -> Domain:
+    """Build the pandas table domain describing a table, from the table itself.
+
+    This is :attr:`Backend.domain_from_dataframe` for the pandas backend, for
+    the pandas :class:`Backend` to bind; it lives here rather than beside that
+    descriptor so that the two implementations of one field can be read
+    together.
+
+    A pandas DataFrame has no schema, only dtypes, so the domain is derived the
+    long way round: dtypes to Analytics columns -- the step that decides what an
+    ``object`` column holds, and what each dtype says about nullability -- and
+    those to the pandas columns descriptor. Going through the Analytics layer
+    rather than mapping dtypes to descriptors directly is what makes the two
+    backends' domains describe the same table: for every column,
+    ``descriptor.to_spark_descriptor()`` is the descriptor the Spark backend
+    would have built, up to the ``allow_null`` disagreement that
+    :mod:`~tmlt.analytics._coerce_pandas_schema` documents.
+    """
+    return PandasTableDomain(
+        analytics_to_pandas_columns_descriptor(
+            Schema(pandas_dtypes_to_analytics_columns(cast(pd.DataFrame, dataframe)))
+        )
+    )
 
 
 class NotSupportedByBackend(NotImplementedError):
@@ -247,6 +308,25 @@ class Backend:
 
     coerce_schema_or_fail: Callable[[Any], Any]
     """Coerces a dataframe to a schema Analytics supports, or raises."""
+
+    domain_from_dataframe: Callable[[AnyDataFrame], Domain] = (
+        spark_domain_from_dataframe
+    )
+    """Builds this backend's table domain from a table, by inspecting the table.
+
+    Distinct from :attr:`dataframe_domain`, which starts from an Analytics
+    :class:`~tmlt.analytics._schema.Schema` that some earlier step worked out.
+    This one is for the entry point, where the data is all there is: it is what
+    :class:`~tmlt.analytics._neighboring_relation_visitor.NeighboringRelationCoreVisitor`
+    mints the accountant's input domain with.
+
+    It has a default, unlike the fields above, so that a :class:`Backend` built
+    before this field existed still constructs. The default is the Spark
+    implementation, matching the rest of the module's convention that a caller
+    who says nothing gets Spark; a non-Spark backend must bind it, and will fail
+    loudly on the first call if it does not, since no other backend's tables
+    have the ``.schema`` the Spark implementation reads.
+    """
 
     def require(self, op_name: str) -> Op:
         """Return an operation, or say clearly that this backend lacks it.

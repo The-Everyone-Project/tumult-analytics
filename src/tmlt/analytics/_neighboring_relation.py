@@ -5,34 +5,128 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, FrozenSet, List, Optional
 
-from pyspark.sql import DataFrame
-from pyspark.sql.types import DateType, IntegerType, LongType, StringType
+import pandas as pd
 from typeguard import check_type
 
-from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends._base import AnyDataFrame
+from tmlt.analytics._coerce_pandas_schema import (
+    _fail_if_dataframe_has_invalid_column_names,
+)
 from tmlt.analytics._coerce_spark_schema import coerce_spark_schema_or_fail
+from tmlt.analytics._schema import (
+    ColumnDescriptor,
+    ColumnType,
+    pandas_dtypes_to_analytics_columns,
+    spark_schema_to_analytics_columns,
+)
+
+ALLOWED_ID_COLUMN_TYPES: FrozenSet[ColumnType] = frozenset(
+    {ColumnType.INTEGER, ColumnType.VARCHAR, ColumnType.DATE}
+)
+"""The Analytics column types a grouping column or an ID column may have.
+
+Both :class:`AddRemoveRowsAcrossGroups` and :class:`AddRemoveKeys` restrict the
+column they protect to this set, and always have: on Spark the check was
+``dataType in [LongType(), StringType(), DateType()]``, applied to a coerced
+frame, and these are the three Analytics types those Spark types stand for. A
+``DECIMAL`` column is excluded because grouping on floating-point values is not
+meaningful, and a ``TIMESTAMP`` column because Analytics has never allowed it
+here.
+
+Stating the rule in Analytics types rather than in one engine's is what lets the
+same check serve both backends. On pandas it admits ``int64`` and ``Int64``
+(``INTEGER``), an ``object`` column of :class:`str` and the ``string`` extension
+dtype (``VARCHAR``), and an ``object`` column of :class:`datetime.date`
+(``DATE``) -- exactly the pandas columns whose Spark counterparts the Spark rule
+admits.
+"""
+
+_ALLOWED_ID_COLUMN_TYPES_STR = ", ".join(
+    sorted(column_type.name for column_type in ALLOWED_ID_COLUMN_TYPES)
+)
+"""The allowed types, rendered for an error message."""
+
+
+def _analytics_columns(df: AnyDataFrame) -> Dict[str, ColumnDescriptor]:
+    """Returns the Analytics columns of a table, as they are once coerced.
+
+    The relations are engine-neutral, but the tables they validate are not, so
+    this is where the two backends' schemas are brought onto common ground: the
+    caller gets :class:`~tmlt.analytics._schema.ColumnDescriptor` objects and
+    never sees a Spark type or a pandas dtype. Which backend a table belongs to
+    is read off the table rather than passed in, since a relation is validated
+    against the very data it will protect.
+
+    Calling this also validates the table the way loading it into a
+    :class:`~tmlt.analytics.Session` would, and raises the same errors: an
+    unsupported Spark type or pandas dtype, an unusable column name, or an
+    ``object`` column holding something other than strings or dates.
+
+    Neither branch materializes coerced data. The Spark branch coerces as it
+    always did, which on Spark builds a query plan and reads nothing; the pandas
+    branch does not, because coercion only ever widens a column within its
+    Analytics column type -- ``IntegerType`` to ``LongType``, ``Int8`` to
+    ``Int64`` -- so it cannot change the answer, and
+    :func:`~tmlt.analytics._coerce_pandas_schema.coerce_pandas_schema_or_fail`
+    would copy the whole frame to tell us something we already know. Nothing it
+    checks is skipped: its column-name check is called directly below, and its
+    dtype and ``object``-column checks are part of
+    :func:`~tmlt.analytics._schema.pandas_dtypes_to_analytics_columns`.
+
+    Args:
+        df: The table to describe.
+
+    Raises:
+        ValueError: If the table is not one Analytics can load.
+    """
+    if isinstance(df, pd.DataFrame):
+        # The private helper is the single source of truth for what makes a
+        # pandas column name usable; coerce_pandas_schema_or_fail, the only
+        # public caller, applies it before doing the copy this avoids.
+        _fail_if_dataframe_has_invalid_column_names(df)
+        return pandas_dtypes_to_analytics_columns(df)
+    return spark_schema_to_analytics_columns(coerce_spark_schema_or_fail(df).schema)
+
+
+def _fail_if_backends_are_mixed(dfs: Dict[str, AnyDataFrame]) -> None:
+    """Raises an error if the tables are not all in one backend's representation.
+
+    A relation describes one accountant, and an accountant has a single input
+    domain, built by a single backend. A mixture would produce a domain
+    describing tables that are not the tables the Session holds, so it is
+    rejected here rather than allowed to become a confusing failure inside Core.
+    """
+    pandas_tables = {name for name, df in dfs.items() if isinstance(df, pd.DataFrame)}
+    other_tables = set(dfs) - pandas_tables
+    if pandas_tables and other_tables:
+        raise ValueError(
+            "The provided input mixes backends: tables"
+            f" {sorted(pandas_tables)} are pandas DataFrames, while tables"
+            f" {sorted(other_tables)} are not. Every table in a relation must be"
+            " in the same representation."
+        )
 
 
 class NeighboringRelation(ABC):
     """Base class for a NeighboringRelation."""
 
     @abstractmethod
-    def validate_input(self, dfs: Dict[str, DataFrame]) -> bool:
+    def validate_input(self, dfs: Dict[str, AnyDataFrame]) -> bool:
         """Does nothing if input is valid, otherwise raises an informative exception.
 
         Used only for top-level validation.
 
         Exception types and common reasons:
-           - TypeError: Input dictionary does not map table names to Spark DataFrames
+           - TypeError: Input dictionary does not map table names to DataFrames
            - ValueError: Input dictionary contains an invalid number of items or
              contains invalid values.
            - KeyError: Relation table doesn't exist in input dictionary
         """
 
     @abstractmethod
-    def _validate(self, dfs: Dict[str, DataFrame]) -> Any:
+    def _validate(self, dfs: Dict[str, AnyDataFrame]) -> Any:
         """Private validation checks.
 
         These are the validation checks to be done
@@ -66,12 +160,12 @@ class AddRemoveRows(NeighboringRelation):
         check_type(self.table, str)
         check_type(self.n, int)
 
-    def validate_input(self, dfs: Dict[str, DataFrame]) -> bool:
+    def validate_input(self, dfs: Dict[str, AnyDataFrame]) -> bool:
         """Does nothing if input is valid, otherwise raises an informative exception.
 
         Used only for top-level validation.
         """
-        check_type(dfs, Dict[str, DataFrame])
+        check_type(dfs, Dict[str, AnyDataFrame])
         if len(dfs) > 1:
             raise ValueError(
                 f"The provided input contains too many items: {dfs.items()}."
@@ -80,7 +174,7 @@ class AddRemoveRows(NeighboringRelation):
         self._validate(dfs)
         return True
 
-    def _validate(self, dfs: Dict[str, DataFrame]) -> List[str]:
+    def _validate(self, dfs: Dict[str, AnyDataFrame]) -> List[str]:
         """Private validation checks.
 
         These are the validation checks to be done
@@ -89,7 +183,11 @@ class AddRemoveRows(NeighboringRelation):
         # validation checks that can be called by other relations. This
         # just verifies that the initialized table is in the dfs input,
         # and that it points to a dataframe object in the Dict.
-        coerce_spark_schema_or_fail(dfs[self.table])
+        #
+        # Looking the table up is what rejects a missing one, with a KeyError
+        # that callers rely on, so it has to stay ahead of the check below --
+        # which is consequently unreachable.
+        _analytics_columns(dfs[self.table])
         if self.table not in dfs.keys():
             raise ValueError(
                 f"""The provided input doesn't contain the relation table
@@ -131,7 +229,7 @@ class AddRemoveRowsAcrossGroups(NeighboringRelation):
         check_type(self.max_groups, int)
         check_type(self.per_group, int)
 
-    def validate_input(self, dfs: Dict[str, DataFrame]) -> bool:
+    def validate_input(self, dfs: Dict[str, AnyDataFrame]) -> bool:
         """Does nothing if input is valid, otherwise raises an informative exception.
 
         Used only for top-level validation.
@@ -140,7 +238,7 @@ class AddRemoveRowsAcrossGroups(NeighboringRelation):
         # and the columns exist and have appropriate types
         # private checks to be done if this is a top-level call:
         # the input dict is of length one, is a DataFrame + public checks.
-        check_type(dfs, Dict[str, DataFrame])
+        check_type(dfs, Dict[str, AnyDataFrame])
         if len(dfs) > 1:
             raise ValueError(
                 f"The provided input contains too many items: {dfs.items()}."
@@ -150,7 +248,7 @@ class AddRemoveRowsAcrossGroups(NeighboringRelation):
         self._validate(dfs)
         return True
 
-    def _validate(self, dfs: Dict[str, DataFrame]) -> List[str]:
+    def _validate(self, dfs: Dict[str, AnyDataFrame]) -> List[str]:
         """Private validation checks.
 
         These are the validation checks to be done
@@ -171,19 +269,12 @@ class AddRemoveRowsAcrossGroups(NeighboringRelation):
                 f" Available columns: {', '.join(dfs[self.table].columns)}"
             )
 
-        allowed_types = [LongType(), StringType(), DateType()]
-        coerced_df = coerce_spark_schema_or_fail(dfs[self.table])
-        if any(
-            (
-                df_field.name == self.grouping_column
-                and df_field.dataType not in allowed_types
-            )
-            for df_field in coerced_df.schema
-        ):
+        columns = _analytics_columns(dfs[self.table])
+        if columns[self.grouping_column].column_type not in ALLOWED_ID_COLUMN_TYPES:
             raise ValueError(
                 f"Grouping column '{self.grouping_column}' is not of a type on which"
                 " grouping is supported. Supported types for grouping:"
-                f" {LongType(), StringType(), DateType(), IntegerType()}"
+                f" {_ALLOWED_ID_COLUMN_TYPES_STR}"
             )
         return [self.table]
 
@@ -225,15 +316,21 @@ class AddRemoveKeys(NeighboringRelation):
         if self.max_keys < 1:
             raise ValueError("max_keys must be positive")
 
-    def validate_input(self, dfs: Dict[str, DataFrame]) -> bool:
+    def validate_input(self, dfs: Dict[str, AnyDataFrame]) -> bool:
         """Does nothing if input is valid, otherwise raises an informative exception.
 
         Used only for top-level validation.
         """
+        # This is the other relation that covers several tables, so it is the
+        # other one that can be handed a mixture of backends. The check is here
+        # rather than in _validate because a Conjunction has already made it
+        # over the whole input by the time it calls that.
+        check_type(dfs, Dict[str, AnyDataFrame])
+        _fail_if_backends_are_mixed(dfs)
         self._validate(dfs)
         return True
 
-    def _validate(self, dfs: Dict[str, DataFrame]) -> List[str]:
+    def _validate(self, dfs: Dict[str, AnyDataFrame]) -> List[str]:
         """Private validation checks.
 
         These are the validation checks to be done in all cases
@@ -241,7 +338,7 @@ class AddRemoveKeys(NeighboringRelation):
         """
         # checks needed here:
         # - input type
-        check_type(dfs, Dict[str, DataFrame])
+        check_type(dfs, Dict[str, AnyDataFrame])
         # - all tables present in table_to_key_column are in the input tables
         difference = set(self.table_to_key_column.keys()).difference(set(dfs.keys()))
         if difference:
@@ -250,8 +347,7 @@ class AddRemoveKeys(NeighboringRelation):
                 " tables used in the relation. Tables that appear only in the relation:"
                 f" {difference}"
             )
-        allowed_types = [LongType(), StringType(), DateType()]
-        key_type: Optional[Union[LongType, StringType, DateType]] = None
+        key_type: Optional[ColumnType] = None
         for table_name, df in dfs.items():
             # check that each table has the requisite column
             # and that the column is the requisite type
@@ -262,33 +358,21 @@ class AddRemoveKeys(NeighboringRelation):
                         f"Key column '{key_column}' does not exist in the input."
                         f" Available columns: {', '.join(df.columns)}"
                     )
-                coerced_df = coerce_spark_schema_or_fail(df)
-                for df_field in coerced_df.schema:
-                    if not df_field.name == key_column:
-                        continue
-                    if df_field.dataType not in allowed_types:
-                        raise ValueError(
-                            f"Key column '{key_column}' is not of a type allowed for"
-                            " keys. Supported types are: LongType(),"
-                            " StringType(), DateType(), IntegerType()."
-                        )
-                    if key_type is None:
-                        if not isinstance(
-                            df_field.dataType, (LongType, StringType, DateType)
-                        ):
-                            raise AnalyticsInternalError(
-                                f"Key column '{key_column}' must have a type of"
-                                " LongType(), StringType(), or DateType(), but"
-                                f" has type {df_field.dataType}."
-                            )
-                        key_type = df_field.dataType
-                    elif not df_field.dataType == key_type:
-                        raise ValueError(
-                            f"Key column '{key_column}' has type "
-                            f"{df_field.dataType}, but in another"
-                            f" table it has type {key_type}. Key types"
-                            " must match across tables"
-                        )
+                column_type = _analytics_columns(df)[key_column].column_type
+                if column_type not in ALLOWED_ID_COLUMN_TYPES:
+                    raise ValueError(
+                        f"Key column '{key_column}' is not of a type allowed for"
+                        f" keys. Supported types are: {_ALLOWED_ID_COLUMN_TYPES_STR}."
+                    )
+                if key_type is None:
+                    key_type = column_type
+                elif column_type != key_type:
+                    raise ValueError(
+                        f"Key column '{key_column}' has type "
+                        f"{column_type}, but in another"
+                        f" table it has type {key_type}. Key types"
+                        " must match across tables"
+                    )
 
         return list(self.table_to_key_column.keys())
 
@@ -324,13 +408,15 @@ class Conjunction(NeighboringRelation):
         """Checks arguments to constructor."""
         check_type(self.children, List[NeighboringRelation])
 
-    def validate_input(self, dfs: Dict[str, DataFrame]) -> bool:
+    def validate_input(self, dfs: Dict[str, AnyDataFrame]) -> bool:
         """Does nothing if input is valid, otherwise raises an informative exception."""
         # checks that the provided input maps tables names to DataFrames
+        # checks that every table belongs to the same backend
         # checks that every input table in dfs is covered in the relation
         # checks each table is covered only once in the relation
         # validation checks pass for each of the children
-        check_type(dfs, Dict[str, DataFrame])
+        check_type(dfs, Dict[str, AnyDataFrame])
+        _fail_if_backends_are_mixed(dfs)
         covered_tables: List[str] = []
         for child in self.children:
             relation_table_names = child._validate(dfs)
@@ -361,7 +447,7 @@ class Conjunction(NeighboringRelation):
         """Visit this NeighboringRelation with a Visitor."""
         return visitor.visit_conjunction(self)
 
-    def _validate(self, dfs: Dict[str, DataFrame]):
+    def _validate(self, dfs: Dict[str, AnyDataFrame]):
         """Private validation checks.
 
         These are the validation checks to be done
