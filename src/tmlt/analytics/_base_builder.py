@@ -6,15 +6,27 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, NamedTuple, Optional, Set
+from typing import Any, Dict, NamedTuple, Optional, Set, Union
 
+import pandas as pd
 from pyspark.sql import DataFrame
 from typeguard import check_type, typechecked
 
-from tmlt.analytics._coerce_spark_schema import coerce_spark_schema_or_fail
+from tmlt.analytics._backends import (
+    SPARK,
+    AnyDataFrame,
+    Backend,
+    NotSupportedByBackend,
+    backend_for_dataframe,
+)
 from tmlt.analytics._utils import assert_is_identifier
+from tmlt.analytics.config import config
 from tmlt.analytics.privacy_budget import PrivacyBudget
-from tmlt.analytics.protected_change import AddRowsWithID, ProtectedChange
+from tmlt.analytics.protected_change import (
+    AddMaxRowsInMaxGroups,
+    AddRowsWithID,
+    ProtectedChange,
+)
 
 
 class BaseBuilder(ABC):
@@ -54,19 +66,28 @@ class PrivacyBudgetMixin:
         return self.__budget
 
 
+# Which backend's frame a builder is handed is how it learns which backend to
+# build on; see DataFrameMixin.with_private_dataframe.
 class PrivateDataFrame(NamedTuple):
     """A private dataframe and its protected change."""
 
-    dataframe: DataFrame
+    dataframe: AnyDataFrame
     protected_change: ProtectedChange
 
 
 class DataFrameMixin:
-    """Adds private and public dataframe support to a builder."""
+    """Adds private and public dataframe support to a builder.
+
+    A builder is also where the backend is chosen. Nobody names one: the first
+    private dataframe's type is the choice, and every table added afterwards
+    must agree with it, because a Session's tables all live in one accountant
+    and an accountant's domain is a domain of one backend's tables.
+    """
 
     __private_dataframes: Dict[str, PrivateDataFrame]
     __public_dataframes: Dict[str, DataFrame]
     __id_spaces: Set[str]
+    __backend: Optional[Backend]
 
     def __init__(self):
         """Constructor.
@@ -77,17 +98,23 @@ class DataFrameMixin:
         self.__private_dataframes = {}
         self.__public_dataframes = {}
         self.__id_spaces = set()
+        self.__backend = None
 
     @typechecked
     def with_private_dataframe(
         self,
         source_id: str,
-        dataframe: DataFrame,
+        dataframe: AnyDataFrame,
         protected_change: ProtectedChange,
     ):
-        """Adds a Spark DataFrame as a private source.
+        """Adds a DataFrame as a private source.
 
-        Not all Spark column types are supported in private sources; see
+        The dataframe may be a Spark DataFrame or, with the ``pandas_backend``
+        feature flag enabled, a pandas one. The first private dataframe decides
+        which backend the Session runs on, and every table added after it must
+        be of the same kind.
+
+        Not all column types are supported in private sources; see
         :class:`~tmlt.analytics.ColumnType` for information about which types are
         supported.
 
@@ -106,15 +133,39 @@ class DataFrameMixin:
         ):
             raise ValueError(f"Table '{source_id}' already exists")
 
-        dataframe = coerce_spark_schema_or_fail(dataframe)
+        backend = self.__backend_for(source_id, dataframe)
+        if backend is not SPARK:
+            if self.__public_dataframes:
+                raise NotSupportedByBackend.for_op(
+                    "Public tables",
+                    backend.name,
+                    f"Table '{source_id}' is a {type(dataframe).__name__}, but"
+                    " this builder already has public tables, which only the"
+                    " Spark backend supports.",
+                )
+            if isinstance(protected_change, AddMaxRowsInMaxGroups):
+                raise NotSupportedByBackend.for_op(
+                    "The AddMaxRowsInMaxGroups protected change",
+                    backend.name,
+                    f"Table '{source_id}' cannot use it. Protecting it needs"
+                    " grouped truncation, which this backend does not have yet."
+                    " AddOneRow, AddMaxRows and AddRowsWithID are supported.",
+                )
+
+        dataframe = backend.coerce_schema_or_fail(dataframe)
         self.__private_dataframes[source_id] = PrivateDataFrame(
             dataframe, protected_change
         )
+        self.__backend = backend
         return self
 
     @typechecked
-    def with_public_dataframe(self, source_id: str, dataframe: DataFrame):
-        """Adds a public dataframe."""
+    def with_public_dataframe(self, source_id: str, dataframe: AnyDataFrame):
+        """Adds a public dataframe.
+
+        Public tables are Spark-only: a pandas Session has no join-public, so a
+        public table on one could never be read.
+        """
         assert_is_identifier(source_id)
         if (
             source_id in self.__private_dataframes
@@ -122,9 +173,53 @@ class DataFrameMixin:
         ):
             raise ValueError(f"Table '{source_id}' already exists")
 
-        dataframe = coerce_spark_schema_or_fail(dataframe)
+        # Either the frame or the builder can be the reason this is refused, and
+        # the message should name whichever it is.
+        backend = backend_for_dataframe(dataframe)
+        unsupported: Optional[Backend] = None
+        if backend is not SPARK:
+            unsupported = backend
+        elif self.__backend is not None and self.__backend is not SPARK:
+            unsupported = self.__backend
+        if unsupported is not None:
+            raise NotSupportedByBackend.for_op(
+                "Public tables",
+                unsupported.name,
+                f"Table '{source_id}' cannot be added: this backend has no"
+                " join-public, so a public table on it could never be read.",
+            )
+
+        dataframe = SPARK.coerce_schema_or_fail(dataframe)
         self.__public_dataframes[source_id] = dataframe
         return self
+
+    def __backend_for(self, source_id: str, dataframe: AnyDataFrame) -> Backend:
+        """Return the backend a new private dataframe puts this builder on.
+
+        Raises:
+            RuntimeError: If it is a pandas dataframe and the ``pandas_backend``
+                feature flag is disabled.
+            ValueError: If it disagrees with the backend an earlier private
+                dataframe established.
+        """
+        backend = backend_for_dataframe(dataframe)
+        # The flag gates the feature as a whole, so it is checked before the
+        # narrower question of whether this table agrees with the others: a
+        # caller who has not enabled the pandas backend is told that first,
+        # rather than being told how to mix backends they cannot use.
+        if backend is not SPARK:
+            config.features.pandas_backend.raise_if_disabled()
+        if self.__backend is not None and backend is not self.__backend:
+            raise ValueError(
+                f"Table '{source_id}' is a {type(dataframe).__name__}, which is"
+                f" a table of the {backend.name} backend, but this Session is"
+                f" being built on the {self.__backend.name} backend -- an"
+                " earlier private table established that. All of a Session's"
+                " tables must be on one backend, because they share one privacy"
+                " accountant. Convert the table before adding it, or start a"
+                " separate Session for it."
+            )
+        return backend
 
     @typechecked
     def with_id_space(self, id_space: str):
@@ -173,6 +268,11 @@ class DataFrameMixin:
     @property
     def _id_spaces(self) -> Set[str]:
         return self.__id_spaces
+
+    @property
+    def _backend(self) -> Optional[Backend]:
+        """The backend this builder is on, or None before the first private table."""
+        return self.__backend
 
 
 class ParameterMixin:

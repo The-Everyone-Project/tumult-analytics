@@ -11,7 +11,26 @@ through that backend's descriptor.
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2025
 
-from pyspark.sql import DataFrame
+from datetime import datetime
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Sequence
+
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.types import (
+    BooleanType,
+    ByteType,
+    DateType,
+    DecimalType,
+    DoubleType,
+    FloatType,
+    IntegerType,
+    LongType,
+    ShortType,
+    StringType,
+    StructType,
+    TimestampType,
+)
+from tmlt.core.domains.base import Domain
 from tmlt.core.domains.spark_domains import (
     SparkDataFrameDomain,
     SparkGroupedDataFrameDomain,
@@ -94,11 +113,74 @@ from tmlt.analytics._schema import (
     analytics_to_spark_columns_descriptor,
     spark_dataframe_domain_to_analytics_columns,
 )
+from tmlt.analytics._utils import AnalyticsInternalError
+
+if TYPE_CHECKING:
+    from tmlt.analytics.keyset import KeySet
 
 
 def _spark_dataframe_domain(schema: Schema) -> SparkDataFrameDomain:
     """Build the Spark domain describing tables with the given Analytics schema."""
     return SparkDataFrameDomain(analytics_to_spark_columns_descriptor(schema))
+
+
+def _spark_sample_keyset(input_domain: Domain, columns: Sequence[str]) -> "KeySet":
+    """Build a one-row KeySet over the given columns of a Spark table domain.
+
+    See :attr:`~tmlt.analytics._backends._base.Backend.sample_keyset` for what
+    this is for. The row's values are per-type defaults; nothing reads them, so
+    the only thing that matters about them is that they are in the column's
+    type.
+    """
+    # Imported here rather than at the top because tmlt.analytics.keyset imports
+    # the top-level tmlt.analytics package, which imports this module by way of
+    # tmlt.analytics.constraints: at the top it would be an import cycle.
+    from tmlt.analytics.keyset import KeySet  # noqa: PLC0415
+
+    if not isinstance(input_domain, SparkDataFrameDomain):
+        raise AnalyticsInternalError(
+            "The Spark backend cannot build a sample KeySet from a "
+            f"{type(input_domain).__name__}."
+        )
+    schema = StructType(
+        [field for field in input_domain.spark_schema if field.name in columns]
+    )
+    spark = SparkSession.builder.getOrCreate()
+
+    # KeySets with no columns aren't allowed to have rows.
+    if not schema.fields:
+        return KeySet.from_dataframe(spark.createDataFrame([], schema=schema))
+
+    default_values = []
+    for field in schema.fields:
+        default_value: Any
+        if isinstance(field.dataType, (ByteType, ShortType, IntegerType, LongType)):
+            default_value = 0
+        elif isinstance(field.dataType, (FloatType, DoubleType)):
+            default_value = 0.0
+        elif isinstance(field.dataType, StringType):
+            default_value = ""
+        elif isinstance(field.dataType, BooleanType):
+            default_value = False
+        elif isinstance(field.dataType, DateType):
+            default_value = datetime.strptime("1970-01-01", "%Y-%m-%d").date()
+        elif isinstance(field.dataType, TimestampType):
+            default_value = datetime.strptime(
+                "1970-01-01 00:00:00", "%Y-%m-%d %H:%M:%S"
+            )
+        elif isinstance(field.dataType, DecimalType):
+            default_value = Decimal("0.0")
+        else:
+            raise ValueError(f"Unsupported data type {field.dataType}")
+        default_values.append(default_value)
+
+    # Create a DataFrame with a single row using the default values
+    df = spark.createDataFrame([tuple(default_values)], schema=schema)
+    if df.schema != schema:
+        raise AnalyticsInternalError(
+            f"Failed to create a DataFrame with schema {schema}."
+        )
+    return KeySet.from_dataframe(df)
 
 
 SPARK = Backend(
@@ -169,6 +251,7 @@ SPARK = Backend(
     columns_descriptor=analytics_to_spark_columns_descriptor,
     domain_to_analytics_columns=spark_dataframe_domain_to_analytics_columns,
     coerce_schema_or_fail=coerce_spark_schema_or_fail,
+    sample_keyset=_spark_sample_keyset,
     domain_from_dataframe=spark_domain_from_dataframe,
 )
 """The Spark backend, and the default everywhere a backend can be chosen."""

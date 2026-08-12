@@ -141,12 +141,19 @@ class Config:
           partition selection when passing a list of columns to
           :meth:`~tmlt.analytics.QueryBuilder.groupby`. This requires evaluating the
           query with an :class:`~tmlt.analytics.ApproxDPBudget`.
+        * ``pandas_backend``: Allows a :class:`~tmlt.analytics.Session` to be built
+          from pandas DataFrames instead of Spark ones, running entirely in memory.
+          Only a subset of queries is supported; an unsupported one raises rather
+          than silently answering differently.
         """
 
         # Add Feature Flags here to list them as experimental:
         # ex. "new_feature = FeatureFlag('Description of new feature', default=False)"
         auto_partition_selection = FeatureFlag(
             "Automatic partition selection is experimental", default=False
+        )
+        pandas_backend = FeatureFlag(
+            "The pandas backend is experimental", default=False
         )
 
         def __init__(self):

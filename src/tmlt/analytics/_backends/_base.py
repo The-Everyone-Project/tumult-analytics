@@ -25,12 +25,14 @@ rather than a :class:`TypeError` about ``None`` not being callable.
 
 from dataclasses import dataclass
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
     Mapping,
     NamedTuple,
     Optional,
+    Sequence,
     Tuple,
     Type,
     Union,
@@ -49,6 +51,12 @@ from tmlt.analytics._schema import (
     pandas_dtypes_to_analytics_columns,
 )
 from tmlt.analytics._utils import AnalyticsInternalError
+
+if TYPE_CHECKING:
+    # For typing only, to keep this module importable on its own: KeySet is only
+    # named in an annotation here, and the concrete backend modules -- which do
+    # have to build one -- import it for themselves.
+    from tmlt.analytics.keyset import KeySet
 
 try:
     from tmlt.core.domains.pandas_domains import PandasTableDomain
@@ -169,6 +177,39 @@ class NotSupportedByBackend(NotImplementedError):
         if hint is not None:
             message = f"{message} {hint}"
         return cls(message, op=op, backend=backend)
+
+
+class BackendUnavailable(ImportError):
+    """A backend Analytics knows about, but the installed Core cannot provide.
+
+    A backend descriptor is only as real as the Core artifacts it binds. When
+    those are missing -- an older or stock Core against a newer Analytics --
+    importing the descriptor's module raises this rather than letting an
+    ``ImportError`` for some deeply-nested Core module reach the user, who has
+    no way to tell from it which backend is unavailable or what would fix it.
+
+    It subclasses :class:`ImportError` because that is what it stands in for,
+    and because ``except ImportError`` around an optional-backend import is the
+    natural thing for a caller to write.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        backend: Optional[str] = None,
+        required: Optional[str] = None,
+    ):
+        """Constructor.
+
+        Args:
+            message: The human-readable message.
+            backend: The name of the unavailable backend, if known.
+            required: The Core artifact whose absence makes it unavailable.
+        """
+        super().__init__(message)
+        self.backend = backend
+        self.required = required
 
 
 Op = Callable[..., Any]
@@ -315,6 +356,17 @@ class Backend:
 
     coerce_schema_or_fail: Callable[[Any], Any]
     """Coerces a dataframe to a schema Analytics supports, or raises."""
+
+    sample_keyset: Callable[[Domain, Sequence[str]], "KeySet"]
+    """Builds a one-row :class:`~tmlt.analytics.KeySet` over the given columns.
+
+    Automatic partition selection has to report the noise its query will add
+    before it knows what the groupby keys are, and the privacy analysis of a
+    keyset does not depend on its contents -- only on its columns. So the noise
+    is computed against a stand-in keyset with one arbitrary row, which this
+    builds. The column *types* come from the table's domain, which is where the
+    backend enters: only that backend's domain knows how to name them.
+    """
 
     domain_from_dataframe: Callable[[AnyDataFrame], Domain] = (
         spark_domain_from_dataframe

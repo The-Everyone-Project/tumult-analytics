@@ -5,32 +5,17 @@
 import math
 import warnings
 from abc import abstractmethod
-from datetime import datetime
-from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import sympy as sp
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.types import (
-    BooleanType,
-    ByteType,
-    DateType,
-    DecimalType,
-    DoubleType,
-    FloatType,
-    IntegerType,
-    LongType,
-    ShortType,
-    StringType,
-    StructType,
-    TimestampType,
-)
+from pyspark.sql import DataFrame
 from tmlt.core.domains.collections import DictDomain
 
 # SparkDataFrameDomain stays a direct import here, unlike in the transformation
-# visitor: the noise-info path below reads `input_domain.spark_schema` to build a
-# sample KeySet, which only a Spark domain has. Those annotations and the guards
-# feeding them are marked spark-only, and move with the KeySet work.
+# visitor: the paths below that name it reach operations no other backend has
+# yet -- UnwrapIfGroupedBy in the GetBounds and GetGroups paths, and the Spark
+# DataFrame the KeySet suppression function takes. Those annotations and the
+# guards feeding them are marked spark-only, and move with the KeySet work.
 from tmlt.core.domains.spark_domains import SparkDataFrameDomain
 from tmlt.core.measurements.aggregations import NoiseMechanism
 from tmlt.core.measurements.base import Measurement
@@ -290,46 +275,6 @@ def _generate_constrained_count_distinct(
     return None
 
 
-def _build_keyset_for_spark_schema(schema: StructType) -> KeySet:
-    """Create a single-row DataFrame with the given schema."""
-    spark = SparkSession.builder.getOrCreate()
-
-    # KeySets with no columns aren't allowed to have rows.
-    if not schema.fields:
-        return KeySet.from_dataframe(spark.createDataFrame([], schema=schema))
-
-    default_values = []
-    for field in schema.fields:
-        default_value: Any
-        if isinstance(field.dataType, (ByteType, ShortType, IntegerType, LongType)):
-            default_value = 0
-        elif isinstance(field.dataType, (FloatType, DoubleType)):
-            default_value = 0.0
-        elif isinstance(field.dataType, StringType):
-            default_value = ""
-        elif isinstance(field.dataType, BooleanType):
-            default_value = False
-        elif isinstance(field.dataType, DateType):
-            default_value = datetime.strptime("1970-01-01", "%Y-%m-%d").date()
-        elif isinstance(field.dataType, TimestampType):
-            default_value = datetime.strptime(
-                "1970-01-01 00:00:00", "%Y-%m-%d %H:%M:%S"
-            )
-        elif isinstance(field.dataType, DecimalType):
-            default_value = Decimal("0.0")
-        else:
-            raise ValueError(f"Unsupported data type {field.dataType}")
-        default_values.append(default_value)
-
-    # Create a DataFrame with a single row using the default values
-    df = spark.createDataFrame([tuple(default_values)], schema=schema)
-    if df.schema != schema:
-        raise AnalyticsInternalError(
-            f"Failed to create a DataFrame with schema {schema}."
-        )
-    return KeySet.from_dataframe(df)
-
-
 def _split_auto_partition_budget(
     budget: PrivacyBudget,
 ) -> Tuple[ApproxDPBudget, ApproxDPBudget]:
@@ -486,14 +431,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         # groupby_agg measurement without being adaptive.
         # The key assumption is that a keyset with 1 arbitrary row will have the same
         # privacy analysis as the adaptively selected keyset.
-        groupby_schema = StructType(
-            [
-                struct_field
-                for struct_field in input_domain.spark_schema
-                if struct_field.name in columns
-            ]
-        )
-        sample_keyset = _build_keyset_for_spark_schema(groupby_schema)
+        sample_keyset = self.backend.sample_keyset(input_domain, columns)
         groupby_sample_keyset = self._build_groupby(
             input_domain, input_metric, mechanism, sample_keyset
         )
@@ -1561,8 +1499,8 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
         transformation = get_table_from_ref(child_transformation, child_ref)
         # backend: spark-only until the KeySet package. These three guards stay
-        # narrow because the domain they establish becomes `mid_domain`, which
-        # _build_adaptive_groupby_agg_and_noise_info reads `.spark_schema` from.
+        # narrow because this path goes on to require UnwrapIfGroupedBy, which
+        # only the Spark backend has.
         if not isinstance(transformation.output_domain, SparkDataFrameDomain):
             raise AnalyticsInternalError(
                 "Expected the output domain to be a SparkDataFrameDomain."
