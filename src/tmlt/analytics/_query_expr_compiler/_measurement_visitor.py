@@ -89,10 +89,19 @@ class MeasurementVisitor(BaseMeasurementVisitor):
         )
 
         transformation = get_table_from_ref(child_transformation, child_ref)
-        if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
+        # Two isinstance calls, deliberately, here and at the two guards below.
+        # The concrete-types tuple is what lets mypy narrow the domain for the
+        # code that follows; the backend's own domain type is the stronger
+        # claim, since this visitor compiles for exactly one backend and a table
+        # domain belonging to the other one would be a mix-up.
+        if not isinstance(
+            transformation.output_domain, DATAFRAME_DOMAIN_TYPES
+        ) or not isinstance(
+            transformation.output_domain, self.backend.dataframe_domain_type
+        ):
             raise AnalyticsInternalError(
-                "Expected GetGroups to receive a SparkDataFrameDomain, but got "
-                f"{transformation.output_domain} instead."
+                f"Unrecognized input domain {type(transformation.output_domain)}"
+                " in a GetGroups query."
             )
 
         # squares the sensitivity in zCDP, which is a worst-case analysis
@@ -101,10 +110,14 @@ class MeasurementVisitor(BaseMeasurementVisitor):
             transformation |= self.backend.require("UnwrapIfGroupedBy")(
                 transformation.output_domain, transformation.output_metric
             )
-        if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
+        if not isinstance(
+            transformation.output_domain, DATAFRAME_DOMAIN_TYPES
+        ) or not isinstance(
+            transformation.output_domain, self.backend.dataframe_domain_type
+        ):
             raise AnalyticsInternalError(
-                "Expected GetGroups to receive a SparkDataFrameDomain, but got "
-                f"{transformation.output_domain} instead."
+                f"Unrecognized input domain {type(transformation.output_domain)}"
+                " in a GetGroups query."
             )
         if not isinstance(
             transformation.output_metric,
@@ -120,10 +133,14 @@ class MeasurementVisitor(BaseMeasurementVisitor):
         )
 
         mid_stability = transformation.stability_function(self.stability)
-        if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
+        if not isinstance(
+            transformation.output_domain, DATAFRAME_DOMAIN_TYPES
+        ) or not isinstance(
+            transformation.output_domain, self.backend.dataframe_domain_type
+        ):
             raise AnalyticsInternalError(
-                "Expected GetGroups to receive a SparkDataFrameDomain, but got "
-                f"{transformation.output_domain} instead."
+                f"Unrecognized input domain {type(transformation.output_domain)}"
+                " in a GetGroups query."
             )
         count_column = "count"
         if count_column in set(transformation.output_domain.schema):

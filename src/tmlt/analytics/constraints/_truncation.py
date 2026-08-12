@@ -118,8 +118,9 @@ class MaxRowsPerID(Constraint):
             transformation = get_table_from_ref(child_transformation, child_ref)
             if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
                 raise AnalyticsInternalError(
-                    "Expected MaxRowsPerID to return a SparkDataFrameDomain, but got "
-                    f"{transformation.output_domain} instead."
+                    "Unrecognized input domain "
+                    f"{type(transformation.output_domain)} in the MaxRowsPerID"
+                    " constraint."
                 )
             if not isinstance(transformation.output_metric, IfGroupedBy):
                 raise AnalyticsInternalError(
@@ -206,8 +207,9 @@ class MaxGroupsPerID(Constraint):
             transformation = get_table_from_ref(child_transformation, child_ref)
             if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
                 raise AnalyticsInternalError(
-                    "Expected MaxGroupsPerID to return a SparkDataFrameDomain, but got "
-                    f"{transformation.output_domain} instead."
+                    "Unrecognized input domain "
+                    f"{type(transformation.output_domain)} in the MaxGroupsPerID"
+                    " constraint."
                 )
             if not isinstance(transformation.output_metric, IfGroupedBy):
                 raise AnalyticsInternalError(
@@ -311,8 +313,9 @@ class MaxRowsPerGroupPerID(Constraint):
             transformation = get_table_from_ref(child_transformation, child_ref)
             if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
                 raise AnalyticsInternalError(
-                    "Expected MaxRowsPerGroupPerID to return a SparkDataFrameDomain, "
-                    f"but got {transformation.output_domain} instead."
+                    "Unrecognized input domain "
+                    f"{type(transformation.output_domain)} in the"
+                    " MaxRowsPerGroupPerID constraint."
                 )
             if not isinstance(transformation.output_metric, IfGroupedBy):
                 raise AnalyticsInternalError(

@@ -221,10 +221,17 @@ class BaseTransformationVisitor(QueryExprVisitor):
             raise AnalyticsInternalError("Child query did not create a transformation.")
         input_domain = lookup_domain(transformation.output_domain, reference)
         input_metric = lookup_metric(transformation.output_metric, reference)
-        if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
+        # Two isinstance calls, deliberately. The concrete-types tuple is what
+        # lets mypy narrow the domain for the code below; the backend's own
+        # domain type is the stronger claim -- this visitor compiles for exactly
+        # one backend, so a table domain belonging to the *other* one is a
+        # mix-up, not merely an unrecognized domain.
+        if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES) or not isinstance(
+            input_domain, self.backend.dataframe_domain_type
+        ):
             raise AnalyticsInternalError(
                 "Child query has an invalid output domain. "
-                f"Expected SparkDataFrameDomain, got {type(input_domain)}."
+                f"Unrecognized input domain {type(input_domain)}."
             )
         if not isinstance(
             input_metric, (IfGroupedBy, SymmetricDifference, HammingDistance)
@@ -249,11 +256,14 @@ class BaseTransformationVisitor(QueryExprVisitor):
             return self.Output(transformation, reference, constraints)
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
+            # See _visit_child for why this is checked twice.
+            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES) or not isinstance(
+                input_domain, self.backend.dataframe_domain_type
+            ):
                 raise AnalyticsInternalError(
                     "Cannot convert this transformation to one with a "
                     "SymmetricDifference output metric. "
-                    f"Expected SparkDataFrameDomain, got {type(input_domain)}."
+                    f"Unrecognized input domain {type(input_domain)}."
                 )
             return create_copy_and_transform_value(
                 parent_domain,
