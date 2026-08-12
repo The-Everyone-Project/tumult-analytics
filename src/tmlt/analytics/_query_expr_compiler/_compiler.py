@@ -21,6 +21,7 @@ from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._catalog import Catalog
 from tmlt.analytics._noise_info import NoiseInfo
 from tmlt.analytics._query_expr import QueryExpr
+from tmlt.analytics._query_expr_compiler._backend_support import check_supported
 from tmlt.analytics._query_expr_compiler._measurement_visitor import MeasurementVisitor
 from tmlt.analytics._query_expr_compiler._rewrite_rules import CompilationInfo, rewrite
 from tmlt.analytics._query_expr_compiler._transformation_visitor import (
@@ -116,7 +117,22 @@ class QueryExprCompiler:
 
     @staticmethod
     def query_schema(query: QueryExpr, catalog: Catalog) -> Schema:
-        """Return the schema created by a given query."""
+        """Return the schema created by a given query.
+
+        Every entry point into compilation comes through here -- ``evaluate``
+        and ``create_view`` to validate the query, ``describe`` for the schema
+        itself -- so this is where a query the backend cannot answer is
+        rejected. It is rejected *before* the schema is computed: validating a
+        query is not free (a ``Filter`` checks its condition against a real
+        ``SparkSession``), and none of that should happen for a query that was
+        never going to run. The backend comes from the catalog, which is the
+        compiler's statement of what it is compiling against.
+
+        Raises:
+            NotSupportedByBackend: If the catalog's backend cannot answer this
+                query. Nothing has been built and no budget spent when it does.
+        """
+        check_supported(query, catalog.backend)
         schema = query.schema(catalog)
         if not isinstance(schema, Schema):
             raise AnalyticsInternalError(
@@ -144,8 +160,9 @@ class QueryExprCompiler:
             input_metric: The input metric of the compiled query.
             catalog: The catalog, used only for query validation.
         """
-        # Computing the schema validates that the query is well-formed.
-        query.schema(catalog)
+        # Computing the schema validates that the query is well-formed, and
+        # that this backend can answer it at all.
+        self.query_schema(query, catalog)
 
         # Compilation happens in two stages: first, we apply rewrite rules...
         compilation_info = CompilationInfo(
@@ -218,10 +235,11 @@ class QueryExprCompiler:
             input_metric: The input metric of the compiled query.
             catalog: The catalog, used only for query validation.
         """
-        # Computing the schema validates that the query is well-formed. It's useful to
-        # perform this check here in addition to __call__ so validation errors can be
-        # raised at view creation, not just query evaluation.
-        query.schema(catalog)
+        # Computing the schema validates that the query is well-formed, and that
+        # this backend can answer it at all. It's useful to perform this check
+        # here in addition to __call__ so validation errors can be raised at
+        # view creation, not just query evaluation.
+        self.query_schema(query, catalog)
 
         transformation_visitor = TransformationVisitor(
             input_domain=input_domain,
