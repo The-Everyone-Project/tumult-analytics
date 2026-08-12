@@ -27,6 +27,12 @@ raise :class:`~._base.BackendUnavailable`, which names the missing artifact and
 what provides it, instead of an ``ImportError`` about a Core submodule the user
 has never heard of. :mod:`~tmlt.analytics._backends` imports this module lazily
 for the same reason: a Spark-only install must be able to import Analytics.
+
+The named artifact stands for the whole pandas stack rather than being the only
+thing imported -- the count measurements come from
+``tmlt.core.measurements.pandas_aggregations``, and the domains from
+``tmlt.core.domains.pandas_domains``. They ship together, in the same Core
+build, so naming one of them is enough to say which build is wanted.
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -69,6 +75,18 @@ try:
         PandasStringColumnDescriptor,
         PandasTableDomain,
         PandasTimestampColumnDescriptor,
+    )
+    from tmlt.core.measurements.pandas_aggregations import (
+        create_count_distinct_measurement,
+        create_count_measurement,
+    )
+    from tmlt.core.transformations.pandas_transformations.add_remove_keys import (
+        LimitKeysPerGroupValue,
+        LimitRowsPerGroupValue,
+        LimitRowsPerKeyPerGroupValue,
+        MapValue,
+        RenameValue,
+        SelectValue,
     )
     from tmlt.core.transformations.pandas_transformations.groupby import GroupBy
     from tmlt.core.transformations.pandas_transformations.join import (
@@ -157,43 +175,25 @@ PANDAS_UNSUPPORTED_OPS: Dict[str, str] = {
     "HammingDistanceToSymmetricDifference": (
         "As UnwrapIfGroupedBy: Core's converter is typed to SparkDataFrameDomain."
     ),
-    # In flight in Core, in packages of their own.
-    **{
-        op: (
-            "TODO(#c9): the pandas AddRemoveKeys value wrappers are in flight in"
-            " Core. Bind this slot when"
-            " tmlt.core.transformations.pandas_transformations.add_remove_keys"
-            " lands."
-        )
-        for op in (
-            "RenameValue",
-            "FilterValue",
-            "SelectValue",
-            "MapValue",
-            "FlatMapValue",
-            "FlatMapByKeyValue",
-            "PublicJoinValue",
-            "DropInfsValue",
-            "DropNaNsValue",
-            "DropNullsValue",
-            "ReplaceInfsValue",
-            "ReplaceNaNsValue",
-            "ReplaceNullsValue",
-            "PersistValue",
-            "UnpersistValue",
-            "LimitRowsPerGroupValue",
-            "LimitKeysPerGroupValue",
-            "LimitRowsPerKeyPerGroupValue",
-        )
-    },
-    "create_count_measurement": (
-        "TODO(#c10): the pandas create_count_*_measurement factories are in"
-        " flight in Core. Bind this slot when they land."
+    # The AddRemoveKeys value wrappers Core's pandas add_remove_keys module does
+    # not have. Each one wraps a transformation, so a value wrapper is missing
+    # for exactly the reason the transformation it wraps is missing, and the
+    # entries below say so rather than restating it.
+    "FilterValue": "As Filter, which is what it wraps.",
+    "FlatMapValue": "As FlatMap, which is what it wraps.",
+    "FlatMapByKeyValue": "As FlatMapByKey, which is what it wraps.",
+    "PublicJoinValue": "As PublicJoin: a pandas Session has no public tables.",
+    "DropInfsValue": "As DropInfs, which is what it wraps.",
+    "DropNaNsValue": "As DropNaNs, which is what it wraps.",
+    "DropNullsValue": "As DropNulls, which is what it wraps.",
+    "ReplaceInfsValue": "As ReplaceInfs, which is what it wraps.",
+    "ReplaceNaNsValue": "As ReplaceNaNs, which is what it wraps.",
+    "ReplaceNullsValue": "As ReplaceNulls, which is what it wraps.",
+    "PersistValue": (
+        "As Persist: there is nothing to persist, and persist_table treats an"
+        " empty slot as a no-op on the AddRemoveKeys path too."
     ),
-    "create_count_distinct_measurement": (
-        "TODO(#c10): the pandas create_count_*_measurement factories are in"
-        " flight in Core. Bind this slot when they land."
-    ),
+    "UnpersistValue": "As Unpersist: unpersist_table treats an empty slot as a no-op.",
     # The remaining aggregations are phase 2: Core's create_*_measurement
     # factories in tmlt.core.measurements.aggregations build on Spark domains
     # and Spark measurements throughout.
@@ -313,6 +313,14 @@ PANDAS = Backend(
         LimitRowsPerGroup=LimitRowsPerGroup,
         LimitKeysPerGroup=LimitKeysPerGroup,
         LimitRowsPerKeyPerGroup=LimitRowsPerKeyPerGroup,
+        RenameValue=RenameValue,
+        SelectValue=SelectValue,
+        MapValue=MapValue,
+        LimitRowsPerGroupValue=LimitRowsPerGroupValue,
+        LimitKeysPerGroupValue=LimitKeysPerGroupValue,
+        LimitRowsPerKeyPerGroupValue=LimitRowsPerKeyPerGroupValue,
+        create_count_measurement=create_count_measurement,
+        create_count_distinct_measurement=create_count_distinct_measurement,
         # Every other slot is left at its None default; PANDAS_UNSUPPORTED_OPS
         # above says which and why.
     ),
