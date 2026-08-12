@@ -16,6 +16,7 @@ from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._schema import ColumnDescriptor
 
 from ._base import KeySetOp
+from ._frames import FrameKind
 from ._utils import validate_column_names
 
 
@@ -45,13 +46,13 @@ class Detect(KeySetOp):
         """
         raise AnalyticsInternalError("KeySetPlan does not have a fixed schema.")
 
-    def unsupported_ops(self, backend: Backend) -> set[str]:
-        """The names of the operations in this op-tree the backend cannot perform.
+    def unsupported_frame_ops(self, kind: FrameKind) -> set[str]:
+        """The operations in this op-tree that cannot produce a frame of this kind.
 
         No backend can materialize a plan, so this one names itself for every
-        backend rather than for a particular one.
+        kind of frame rather than for a particular one.
         """
-        unsupported_ops = super().unsupported_ops(backend)
+        unsupported_ops = super().unsupported_frame_ops(kind)
         unsupported_ops.add(type(self).__name__)
         return unsupported_ops
 

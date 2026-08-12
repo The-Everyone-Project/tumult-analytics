@@ -11,7 +11,9 @@ integer column into a ``float64`` one, so a null arrives as a NaN and the two
 become indistinguishable; and a pandas frame spells a null three ways
 (``None``, ``pd.NA``, ``float("nan")``), only two of which mean "null". Both
 sides are therefore reduced to a multiset of rows of tagged Python values by
-:func:`_rows`, which keeps a null and a NaN apart, before being compared.
+:func:`~tmlt.analytics.keyset._ops._frames.frame_rows`, which keeps a null and a
+NaN apart, before being compared. That function lives in ``src`` rather than
+here because :meth:`KeySet.__eq__` decides equality with it.
 
 Half of this module is such a comparison, and so needs a Spark session; the other
 half asks only about the pandas frame. The comparisons carry ``@pytest.mark.spark``
@@ -52,7 +54,7 @@ from tmlt.analytics import KeySet
 from tmlt.analytics._backends import SPARK, Backend, NotSupportedByBackend
 from tmlt.analytics._schema import Schema, analytics_to_pandas_dtypes
 from tmlt.analytics.keyset._ops import KeySetOp
-from tmlt.analytics.keyset._ops._frames import FrameKind, frame_kind
+from tmlt.analytics.keyset._ops._frames import FrameKind, frame_kind, frame_rows
 
 PANDAS = replace(SPARK, name="pandas", dataframe_type=pd.DataFrame)
 """A stand-in for the pandas backend descriptor, until the real one exists.
@@ -72,41 +74,14 @@ NEITHER = replace(SPARK, name="something else", dataframe_type=int)
 # Comparing the two backends' output
 ################################################################################
 
-_Value = Tuple[str, Any]
+_rows = frame_rows
+"""The multiset-of-tagged-rows comparison, which lives in src.
 
-
-def _tagged(value: Any) -> _Value:
-    """Returns a comparable tag for one value of a key.
-
-    A null and a NaN are tagged differently: they are different keys on Spark,
-    and Core's pandas utilities keep them apart too, so a comparison that
-    conflated them would not notice one turning into the other.
-    """
-    if value is None or value is pd.NA or value is pd.NaT:
-        return ("null", None)
-    if isinstance(value, (float, np.floating)) and math.isnan(value):
-        return ("nan", None)
-    return ("value", value)
-
-
-def _rows(
-    frame: Union[DataFrame, pd.DataFrame], columns: Sequence[str]
-) -> Counter[Tuple[_Value, ...]]:
-    """Returns the multiset of rows of a frame of either kind.
-
-    Rows are read as Python values -- ``collect`` on Spark, ``itertuples`` on
-    pandas -- rather than by converting one frame into the other, so that no
-    conversion gets to decide what a null is on the way.
-    """
-    if isinstance(frame, pd.DataFrame):
-        if not columns:
-            return Counter([()] * len(frame.index))
-        records: Sequence[Sequence[Any]] = [
-            tuple(record) for record in frame[list(columns)].itertuples(index=False)
-        ]
-    else:
-        records = [tuple(row[column] for column in columns) for row in frame.collect()]
-    return Counter(tuple(_tagged(value) for value in record) for record in records)
+It is what :meth:`KeySet.__eq__` decides equality on when both op-trees can be
+built in memory, so it is engine code rather than test code; the tests here read
+it from where it lives so that the two cannot come apart. Aliased because it is
+used in nearly every assertion below.
+"""
 
 
 def assert_same_keys(keyset: KeySet) -> None:
@@ -626,3 +601,132 @@ def test_keyset_dataframe_with_a_pandas_backend() -> None:
     frame: Any = keyset.dataframe(PANDAS)
     assert isinstance(frame, pd.DataFrame)
     assert frame is keyset.to_pandas()
+
+
+################################################################################
+# Equality, and which engine decides it
+################################################################################
+#
+# KeySet.__eq__ falls back to comparing the keys themselves whenever
+# is_equivalent cannot answer from the op-trees. That fallback used to be a
+# Spark exceptAll on frames built at the Spark default, so comparing two
+# KeySets built from Python literals started a JVM -- and __eq__ is reached
+# from places that never mention a backend: a frozen Query dataclass holding a
+# KeySet, or a dict lookup, since __hash__ hashes the schema alone and leaves
+# every collision to be settled by ==. The tests below are unmarked, so the
+# no-JVM lane runs them and the claim is checked rather than asserted.
+
+
+def test_equality_of_in_memory_keysets_needs_no_spark() -> None:
+    """Two KeySets whose trees can be built in memory compare in memory.
+
+    The four keysets are the ones in :meth:`KeySet.__eq__`'s own docstring: the
+    same keys in a different column order, the same keys in a different row
+    order, and a different set of keys.
+    """
+    ks1 = KeySet.from_dict({"A": [1, 2], "B": [3, 4]})
+    ks2 = KeySet.from_dict({"B": [3, 4], "A": [1, 2]})
+    ks3 = KeySet.from_dict({"B": [4, 3], "A": [2, 1]})
+    ks4 = KeySet.from_dict({"B": [4, 5], "A": [1, 2]})
+    assert ks1 == ks2
+    assert ks1 == ks3
+    assert ks1 != ks4
+    assert ks4 != ks1
+
+
+@parametrize(
+    Case("subtraction")(
+        left=KeySet.from_dict({"A": ["a1", "a2", "a3"]})
+        - KeySet.from_tuples([("a3",)], columns=["A"]),
+        right=KeySet.from_tuples([("a1",), ("a2",)], columns=["A"]),
+        equal=True,
+    ),
+    Case("subtraction_unequal")(
+        left=KeySet.from_dict({"A": ["a1", "a2", "a3"]})
+        - KeySet.from_tuples([("a3",)], columns=["A"]),
+        right=KeySet.from_tuples([("a1",), ("a3",)], columns=["A"]),
+        equal=False,
+    ),
+    Case("cross_join")(
+        left=KeySet.from_dict({"A": ["a1", "a2"]}) * KeySet.from_dict({"B": [1, 2]}),
+        right=KeySet.from_tuples(
+            [("a1", 1), ("a1", 2), ("a2", 1), ("a2", 2)], columns=["A", "B"]
+        ),
+        equal=True,
+    ),
+    Case("union")(
+        left=KeySet.from_dict({"A": ["a1"]}).union(KeySet.from_dict({"A": ["a2"]})),
+        right=KeySet.from_dict({"A": ["a1", "a2"]}),
+        equal=True,
+    ),
+    Case("a_null_key_is_a_key")(
+        left=KeySet.from_dict({"A": ["a1", "a2", None]})
+        - KeySet.from_tuples([("a2",)], columns=["A"]),
+        right=KeySet.from_tuples([("a1",), (None,)], columns=["A"]),
+        equal=True,
+    ),
+    Case("a_null_key_is_not_a_missing_key")(
+        left=KeySet.from_dict({"A": ["a1", None]}),
+        right=KeySet.from_tuples([("a1",)], columns=["A"]),
+        equal=False,
+    ),
+    Case("from_pandas_against_from_tuples")(
+        left=KeySet.from_pandas(
+            pd.DataFrame(
+                {"A": ["a1", "a2", None], "B": pd.array([1, 2, None], "Int64")}
+            )
+        ),
+        right=KeySet.from_tuples(
+            [("a1", 1), ("a2", 2), (None, None)], columns=["A", "B"]
+        ),
+        equal=True,
+    ),
+)
+def test_value_equality_without_spark(left: KeySet, right: KeySet, equal: bool) -> None:
+    """Value-level equality is answered in memory, and answered correctly.
+
+    Every case here is one ``is_equivalent`` cannot settle from the op-trees, so
+    each really does take the fallback -- which is the path this is about.
+    """
+    assert left.is_equivalent(right) is None
+    assert (left == right) is equal
+    assert (right == left) is equal
+
+
+@pytest.mark.spark
+def test_equality_against_a_spark_tree_uses_spark(spark) -> None:
+    """A comparison one side of which needs Spark is done on Spark.
+
+    A KeySet built from a Spark DataFrame cannot be materialized in memory --
+    collecting a distributed frame is its owner's decision -- so the in-memory
+    path is not available for it, whatever the other side is. The comparison
+    still has to give the right answer, and it does: both sides go to Spark, as
+    they always did.
+    """
+    from_spark = KeySet.from_dataframe(
+        spark.createDataFrame(pd.DataFrame({"A": ["a1", "a2"]}))
+    )
+    in_memory = KeySet.from_tuples([("a1",), ("a2",)], columns=["A"])
+    different = KeySet.from_tuples([("a1",), ("a3",)], columns=["A"])
+
+    assert from_spark._op_tree.unsupported_frame_ops(FrameKind.PANDAS)
+    assert not in_memory._op_tree.unsupported_frame_ops(FrameKind.PANDAS)
+
+    assert from_spark == in_memory
+    assert in_memory == from_spark
+    assert from_spark != different
+    assert different != from_spark
+    # The in-memory side was compared without being built in memory.
+    assert FrameKind.PANDAS not in in_memory._dataframes
+
+
+@pytest.mark.spark
+def test_a_filtered_keyset_is_compared_on_spark(spark) -> None:
+    """The other irreducibly-Spark tree: one built by filtering."""
+    # pylint: disable=unused-argument
+    filtered = KeySet.from_dict({"A": ["a1", "a2"]}).filter("A = 'a1'")
+    in_memory = KeySet.from_tuples([("a1",)], columns=["A"])
+    assert filtered._op_tree.unsupported_frame_ops(FrameKind.PANDAS) == {"Filter"}
+    assert filtered == in_memory
+    assert in_memory == filtered
+    assert filtered != KeySet.from_tuples([("a2",)], columns=["A"])

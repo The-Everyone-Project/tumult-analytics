@@ -73,16 +73,16 @@ class Filter(KeySetOp):
             " filtered KeySet with KeySet.from_tuples instead.",
         )
 
-    def unsupported_ops(self, backend: Backend) -> set[str]:
-        """The names of the operations in this op-tree the backend cannot perform.
+    def unsupported_frame_ops(self, kind: FrameKind) -> set[str]:
+        """The operations in this op-tree that cannot produce a frame of this kind.
 
         A filter condition is a Spark SQL expression or a
         :class:`~pyspark.sql.Column`, and evaluating one means asking Spark. It
         is a piece of Spark the user wrote, not a piece Analytics chose, so
         there is nothing to translate it into.
         """
-        unsupported_ops = super().unsupported_ops(backend)
-        if frame_kind(backend) is FrameKind.PANDAS:
+        unsupported_ops = super().unsupported_frame_ops(kind)
+        if kind is FrameKind.PANDAS:
             unsupported_ops.add(type(self).__name__)
         return unsupported_ops
 

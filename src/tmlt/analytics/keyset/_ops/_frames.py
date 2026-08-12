@@ -36,8 +36,11 @@ of this.
 from __future__ import annotations
 
 import enum
-from typing import Any, Iterable, Mapping, Optional, Sequence, Union
+import math
+from collections import Counter
+from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
+import numpy as np
 import pandas as pd
 from pyspark.sql import DataFrame
 
@@ -50,6 +53,9 @@ from tmlt.analytics._schema import (
 
 KeySetFrame = Union[DataFrame, pd.DataFrame]
 """A materialized KeySet, in whichever kind of frame it was asked for."""
+
+TaggedValue = Tuple[str, Any]
+"""One value of one key, tagged so that a null and a NaN stay apart."""
 
 
 class FrameKind(enum.Enum):
@@ -112,6 +118,58 @@ def select_columns(frame: KeySetFrame, columns: Sequence[str]) -> KeySetFrame:
     if isinstance(frame, pd.DataFrame):
         return frame[list(columns)]
     return frame.select(*columns)
+
+
+def tagged_value(value: Any) -> TaggedValue:
+    """Returns a comparable tag for one value of a key.
+
+    A null and a NaN are tagged differently. They are different keys on Spark,
+    and Core's pandas utilities keep them apart too, so a comparison that
+    conflated them would not notice one turning into the other. Both are also
+    tagged with a fixed payload rather than themselves, since ``nan != nan``
+    would otherwise make a row unequal to itself.
+
+    Args:
+        value: The value to tag.
+    """
+    if value is None or value is pd.NA or value is pd.NaT:
+        return ("null", None)
+    if isinstance(value, (float, np.floating)) and math.isnan(value):
+        return ("nan", None)
+    return ("value", value)
+
+
+def frame_rows(
+    frame: KeySetFrame, columns: Sequence[str]
+) -> Counter[Tuple[TaggedValue, ...]]:
+    """Returns the multiset of a frame's rows, as tagged Python values.
+
+    This is what "these two frames hold the same keys" is decided on: a multiset
+    rather than a set, so that a duplicated row is a difference; of tagged
+    values, so that a null and a NaN are not confused for one another.
+
+    Rows are read as Python values -- ``collect`` on Spark, ``itertuples`` on
+    pandas -- rather than by converting one frame into the other, so that no
+    conversion gets to decide what a null is on the way. ``toPandas`` on a Spark
+    frame is exactly such a conversion: it turns a nullable integer column into
+    a ``float64`` one, and a null in it arrives as a NaN.
+
+    A frame with no columns is the total-aggregation KeySet, whose rows are all
+    the empty row; only how many there are can differ.
+
+    Args:
+        frame: The frame to read.
+        columns: The columns to read, in the order they are compared in.
+    """
+    if isinstance(frame, pd.DataFrame):
+        if not columns:
+            return Counter([()] * len(frame.index))
+        records: Iterable[Sequence[Any]] = (
+            tuple(record) for record in frame[list(columns)].itertuples(index=False)
+        )
+    else:
+        records = (tuple(row[column] for column in columns) for row in frame.collect())
+    return Counter(tuple(tagged_value(value) for value in record) for record in records)
 
 
 def pandas_frame_from_tuples(

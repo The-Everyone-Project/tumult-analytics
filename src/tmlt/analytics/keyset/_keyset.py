@@ -37,6 +37,7 @@ from ._ops._frames import (
     KeySetFrame,
     cast_to_schema,
     frame_kind,
+    frame_rows,
     select_columns,
 )
 
@@ -640,6 +641,22 @@ class KeySet:
         Two KeySets are equal if they contain the same values for the same
         columns; the rows and columns may appear in any order.
 
+        When :meth:`is_equivalent` cannot answer from the op-trees alone, the
+        keys have to be built and compared. Which engine builds them is decided
+        here rather than passed in -- ``==`` takes no arguments, and a KeySet is
+        compared in places that know nothing about backends: two frozen
+        :class:`~tmlt.analytics.Query` dataclasses holding KeySets, or a KeySet
+        looked up in a dict, whose :meth:`__hash__` hashes only the schema and
+        so leaves every collision to be settled here.
+
+        So the choice is inferred. If both op-trees can be materialized in
+        memory -- a pure walk of the two trees, which builds nothing -- the
+        comparison is done on pandas frames; otherwise it is done on Spark, as
+        it always was. That keeps a comparison of two ordinary KeySets from
+        starting a JVM, which on a pandas Session was the whole cost: the trees
+        are usually small literal data that was in memory to begin with, and
+        the Spark path would have shipped it out to be brought back.
+
         Example:
             >>> ks1 = KeySet.from_dict({"A": [1, 2], "B": [3, 4]})
             >>> ks2 = KeySet.from_dict({"B": [3, 4], "A": [1, 2]})
@@ -661,6 +678,16 @@ class KeySet:
 
         # Reorder columns between the two dataframes to match
         columns = self.columns()
+        if not (
+            self._op_tree.unsupported_frame_ops(FrameKind.PANDAS)
+            or other._op_tree.unsupported_frame_ops(FrameKind.PANDAS)
+        ):
+            # Multisets of null-tagged rows, so that a duplicated row and a null
+            # turning into a NaN are both differences; see frame_rows.
+            return frame_rows(self.to_pandas(), columns) == frame_rows(
+                other.to_pandas(), columns
+            )
+
         self_df = self.dataframe().select(*columns)
         other_df = other.dataframe().select(*columns)
         # other_df should contain all rows in self_df

@@ -98,9 +98,23 @@ class KeySetOp(ABC):
         Args:
             backend: The backend the tree would be materialized on.
         """
+        return self.unsupported_frame_ops(frame_kind(backend))
+
+    def unsupported_frame_ops(self, kind: FrameKind) -> set[str]:
+        """The operations in this op-tree that cannot produce a frame of this kind.
+
+        This is :meth:`unsupported_ops` with the backend already resolved to the
+        one thing the answer depends on, and stands to it as :meth:`frame` does
+        to :meth:`dataframe`. It is the form the overrides are written against,
+        and the form a caller with no backend in hand -- :meth:`KeySet.__eq__`,
+        which cannot be given one -- asks the question in.
+
+        Args:
+            kind: The kind of frame the tree would be materialized as.
+        """
         unsupported_ops: set[str] = set()
         for child in self.children():
-            unsupported_ops |= child.unsupported_ops(backend)
+            unsupported_ops |= child.unsupported_frame_ops(kind)
         return unsupported_ops
 
     @abstractmethod
