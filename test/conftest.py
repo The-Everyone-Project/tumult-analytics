@@ -501,10 +501,7 @@ def _requires_spark(item: pytest.Item) -> bool:
         return True
     callspec = getattr(item, "callspec", None)
     params = getattr(callspec, "params", {}) if callspec is not None else {}
-    if params.get("backend") == "spark":
-        return True
-    backend = params.get("backend")
-    return getattr(backend, "name", None) == "spark"
+    return params.get("backend") == "spark"
 
 
 def pytest_collection_modifyitems(items: List[pytest.Item]) -> None:
@@ -594,14 +591,17 @@ def forbid_jvm() -> Iterator[None]:
         if getattr(module, "launch_gateway", None) is not None:
             setattr(module, "launch_gateway", _forbidden_launch_gateway)
 
-    # Importing tmlt.core.utils.cleanup registers an atexit hook that calls
-    # SparkSession.builder.getOrCreate() to drop Core's temporary database. In
-    # this lane no session ever exists, so there is no temporary database to
-    # drop -- but the hook would still boot a JVM, and it runs after pytest has
-    # returned, where raising only prints "Exception ignored in atexit callback"
-    # and leaves the exit code untouched. Since the lane could not fail on it,
-    # drop it. Note that this is the guard working around library behaviour, not
-    # proving anything about it.
+    # Importing tmlt.core.utils.cleanup registers an atexit hook that drops
+    # Core's temporary database. _cleanup_temp returns immediately when there is
+    # no active Spark session, so in this lane it is already a no-op and this
+    # line is redundant -- it is kept as a second line of defence, because the
+    # hook runs after pytest has returned, where an exception only prints
+    # "Exception ignored in atexit callback" and leaves the exit code at zero. A
+    # regression there could not fail this lane, so do not rely on the lane to
+    # catch one. What does prove the hook starts no JVM is Core's own
+    # test/unit/utils/test_cleanup.py::test_atexit_hook_does_not_start_a_jvm,
+    # which runs an interpreter in a subprocess and checks that it exits without
+    # one.
     atexit.unregister(core_cleanup._cleanup_temp)
 
     if java_gateway.launch_gateway is not _forbidden_launch_gateway:
