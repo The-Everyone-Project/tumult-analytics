@@ -1262,13 +1262,6 @@ class Session:
             )
 
         try:
-            if not measurement.privacy_relation(
-                self._accountant.d_in, adjusted_budget.value
-            ):
-                raise AnalyticsInternalError(
-                    "With these inputs and this privacy budget, similar inputs will"
-                    " *not* produce similar outputs."
-                )
             try:
                 return self._accountant.measure(
                     measurement, d_out=adjusted_budget.value
@@ -1282,6 +1275,26 @@ class Session:
                 raise RuntimeError(
                     "Cannot answer query without exceeding the Session privacy budget."
                     + msg
+                ) from err
+            except ValueError as err:
+                # The privacy relation is not checked before measure() is
+                # called, because measure() checks it itself -- and so does the
+                # SequentialQueryable underneath it -- each of them before any
+                # budget is subtracted. Evaluating the relation is the
+                # expensive part of answering a small query, and a third
+                # evaluation bought nothing but the wording below.
+                #
+                # So ask it only now, and only to find out whether the relation
+                # is what Core objected to: measure() raises several other
+                # ValueErrors, about mismatched domains, metrics and measures,
+                # which mean something else and must not be reworded into this.
+                if measurement.privacy_relation(
+                    self._accountant.d_in, adjusted_budget.value
+                ):
+                    raise
+                raise AnalyticsInternalError(
+                    "With these inputs and this privacy budget, similar inputs will"
+                    " *not* produce similar outputs."
                 ) from err
         except InactiveAccountantError as e:
             raise RuntimeError(

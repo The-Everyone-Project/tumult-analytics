@@ -27,6 +27,7 @@ accountant rather than the arithmetic.
 # Copyright Tumult Labs 2025
 
 from typing import Iterator, List
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -34,6 +35,7 @@ import pytest
 from tmlt.analytics import (
     AddMaxRows,
     AddRowsWithID,
+    AnalyticsInternalError,
     KeySet,
     MaxGroupsPerID,
     MaxRowsPerGroupPerID,
@@ -529,6 +531,50 @@ def test_evaluate_with_noise_info_spends_the_budget_once():
     # pylint: disable=protected-access
     session._evaluate_with_noise_info(query, PureDPBudget(1))
     assert session.remaining_privacy_budget == PureDPBudget(1)
+
+
+def test_a_failing_privacy_relation_is_still_an_internal_error():
+    """Core's rejection is reworded, not passed through raw.
+
+    The Session no longer evaluates the privacy relation before handing the
+    measurement to the accountant -- the accountant checks it, and so does the
+    queryable under it, both before any budget is subtracted, so a third
+    evaluation only cost time. What that check used to provide was the wording,
+    and it still does: the relation is asked once the accountant has objected,
+    to find out whether the relation is what it objected to.
+    """
+    session = _session(PureDPBudget(10))
+    query = QueryBuilder("t").groupby(A_KEYS).count()
+    # pylint: disable=protected-access
+    measurement, adjusted, _ = session._compile_and_get_info(
+        query._query_expr, PureDPBudget(1)
+    )
+    before = session.remaining_privacy_budget
+    with patch.object(measurement, "privacy_relation", return_value=False):
+        with pytest.raises(AnalyticsInternalError, match="similar outputs"):
+            session._evaluate_compiled(measurement, adjusted, PureDPBudget(1))
+    # Core refuses before it spends, so nothing was spent.
+    assert session.remaining_privacy_budget == before
+
+
+def test_other_value_errors_from_the_accountant_are_left_alone():
+    """Only a failing relation is reworded.
+
+    ``measure`` raises ValueErrors about mismatched domains, metrics and
+    measures too, and rewording one of those as "similar inputs will not
+    produce similar outputs" would send the reader after the wrong thing.
+    """
+    session = _session(PureDPBudget(10))
+    query = QueryBuilder("t").groupby(A_KEYS).count()
+    # pylint: disable=protected-access
+    measurement, adjusted, _ = session._compile_and_get_info(
+        query._query_expr, PureDPBudget(1)
+    )
+    mismatch = ValueError("Measurement's input domain does not match.")
+    with patch.object(session._accountant, "measure", side_effect=mismatch):
+        with pytest.raises(ValueError) as excinfo:
+            session._evaluate_compiled(measurement, adjusted, PureDPBudget(1))
+    assert excinfo.value is mismatch
 
 
 def test_evaluating_twice_spends_the_budget_twice():
