@@ -236,8 +236,12 @@ def test_import_guard_names_the_missing_core_artifact(monkeypatch):
     assert excinfo.value.required == missing
     message = str(excinfo.value)
     assert missing in message
-    # The error has to say what would fix it, not only what is wrong.
-    assert "ep.pandas" in message
+    # The error has to say what would fix it, not only what is wrong: which
+    # build line has the module, and that getting it means repointing the
+    # source rather than raising a bound, since no specifier can name a local
+    # version.
+    assert "ep.backend" in message
+    assert "tool.uv.sources" in message
     assert isinstance(excinfo.value, ImportError)
 
 

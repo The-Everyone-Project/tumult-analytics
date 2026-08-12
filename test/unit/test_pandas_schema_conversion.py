@@ -30,8 +30,12 @@ from tmlt.core.domains.pandas_domains import (
     PandasTimestampColumnDescriptor,
 )
 
-from tmlt.analytics._coerce_pandas_schema import coerce_pandas_schema_or_fail
+from tmlt.analytics._coerce_pandas_schema import (
+    SUPPORTED_PANDAS_DTYPES,
+    coerce_pandas_schema_or_fail,
+)
 from tmlt.analytics._schema import (
+    _PANDAS_DTYPE_TO_ANALYTICS,
     _SPARK_TO_ANALYTICS,
     ColumnDescriptor,
     ColumnType,
@@ -709,3 +713,38 @@ class TestSparkInferenceComparison:
         spark_type = spark.createDataFrame(uncoerced).schema["A"].dataType
         assert spark_type in (spark_types.ByteType(), spark_types.ShortType())
         assert spark_type not in _SPARK_TO_ANALYTICS
+
+
+class TestDtypeTablesAgree:
+    """The two dtype tables describe the same set of dtypes.
+
+    A pandas frame's columns are read by two tables that were written
+    separately. :data:`~tmlt.analytics._coerce_pandas_schema.SUPPORTED_PANDAS_DTYPES`
+    decides whether a frame is accepted at all, and
+    :data:`~tmlt.analytics._schema._PANDAS_DTYPE_TO_ANALYTICS` decides which
+    Analytics column type each dtype becomes. Coercion runs first, so anything
+    the second table is asked about has already been through the first.
+    """
+
+    def test_the_two_tables_cover_the_same_dtypes(self) -> None:
+        """Neither table knows a dtype the other does not.
+
+        The two failures this rules out are opposite and both silent. A dtype
+        accepted by the coercion table but absent from the conversion table --
+        ``uint64`` was the near miss, being an integer dtype whose values do not
+        all fit in one -- passes the frame through the door and then fails
+        somewhere inside schema inference, with an error about a dtype the user
+        was just told was supported. A dtype in the conversion table but not the
+        coercion one is dead: no frame carrying it ever gets far enough to be
+        converted, so the entry claims a support that does not exist.
+
+        ``object`` is the one deliberate difference, and is on the accepted side
+        only. It is not a type: it is how pandas carries strings and dates, and
+        which of those a column holds is decided by looking at the values, by
+        ``object_column_element_type`` and
+        :data:`~tmlt.analytics._schema._PANDAS_TO_ANALYTICS_ELEMENT_TYPE`, not by
+        the dtype.
+        """
+        assert set(SUPPORTED_PANDAS_DTYPES) == set(_PANDAS_DTYPE_TO_ANALYTICS) | {
+            np.dtype(object)
+        }

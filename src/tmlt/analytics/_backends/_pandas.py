@@ -118,9 +118,17 @@ except ImportError as exc:
     raise BackendUnavailable(
         "The pandas backend requires a Tumult Core that provides"
         f" '{_REQUIRED_CORE_ARTIFACT}', and the installed Core does not."
-        " That module ships in the Everyone Project Core build"
-        " (tmlt.core 0.19.1+ep.pandas.1 or later); no official Core release"
-        " contains it. Install that build, or use the default Spark backend.",
+        " That module ships only in the Everyone Project Core builds of the"
+        " 0.19.1+ep.backend.N line: no official Core release contains it, and"
+        " neither do the older 0.19.1+ep.pandas.N wheels, which carry the"
+        " pandas truncation helper and nothing else of this stack. A PEP 440"
+        " local version cannot be named in a dependency specifier, so such a"
+        " build is installed by pointing straight at it -- fix this by"
+        " repointing the 'tmlt.core' entry in [tool.uv.sources] at an"
+        " ep.backend wheel URL, or at a checkout of the Core fork's"
+        " integration branch. Raising a version bound will not do it: no bound"
+        " can select a local version. Or use the default Spark backend, which"
+        " needs none of this.",
         backend="pandas",
         required=_REQUIRED_CORE_ARTIFACT,
     ) from exc
