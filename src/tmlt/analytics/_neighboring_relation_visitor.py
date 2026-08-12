@@ -7,10 +7,8 @@ import dataclasses
 from typing import Any, Dict, NamedTuple, Union
 
 import sympy as sp
-from pyspark.sql import DataFrame
 from tmlt.core.domains.base import Domain
 from tmlt.core.domains.collections import DictDomain
-from tmlt.core.domains.spark_domains import SparkDataFrameDomain
 from tmlt.core.measures import ApproxDP, PureDP, RhoZCDP
 from tmlt.core.metrics import (
     AddRemoveKeys as CoreAddRemoveKeys,
@@ -23,6 +21,8 @@ from tmlt.core.metrics import (
 )
 from tmlt.core.utils.exact_number import ExactNumber
 
+from tmlt.analytics._backends._base import AnyDataFrame, Backend
+from tmlt.analytics._backends._spark import SPARK
 from tmlt.analytics._neighboring_relation import (
     AddRemoveKeys,
     AddRemoveRows,
@@ -34,13 +34,23 @@ from tmlt.analytics._table_identifier import Identifier, NamedTable, TableCollec
 
 
 def _ensure_valid_schema_ark(
-    metric_dict: Dict[Identifier, str], domain_dict: Dict[Identifier, Any]
+    metric_dict: Dict[Identifier, str],
+    domain_dict: Dict[Identifier, Any],
+    backend: Backend = SPARK,
 ) -> Dict[Identifier, Any]:
     """Ensure valid schema for an ``AddRemoveKeys`` neighboring relation.
 
     Ensures that the schema for the table(s) in the ``AddRemoveKeys`` neighboring
     relation have consistent nullability in the key column(s), which is required for
     the metric to support the domain.
+
+    The harmonization itself is engine-neutral: a table domain's ``schema`` is a
+    mapping of column names to that backend's column descriptors, every one of
+    which is a frozen dataclass with an ``allow_null`` field, so widening one
+    reads the same in both families. Only rebuilding the domain around the
+    widened schema names a domain type, and that comes from ``backend``. No
+    descriptor conversion is involved: the schema was read out of this backend's
+    own domain, so it is already in this backend's descriptor language.
     """
     nullable_id_col = any(
         domain_dict[table_id].schema[key_column].allow_null
@@ -52,7 +62,7 @@ def _ensure_valid_schema_ark(
             table_schema[key_column] = dataclasses.replace(
                 table_schema[key_column], allow_null=True
             )
-            domain_dict[table_id] = SparkDataFrameDomain(table_schema)
+            domain_dict[table_id] = backend.dataframe_domain_type(table_schema)
 
     return domain_dict
 
@@ -100,19 +110,31 @@ class NeighboringRelationCoreVisitor(NeighboringRelationVisitor):
 
     def __init__(
         self,
-        tables: Dict[str, DataFrame],
+        tables: Dict[str, AnyDataFrame],
         output_measure: Union[PureDP, ApproxDP, RhoZCDP],
+        backend: Backend = SPARK,
     ):
-        """Constructor."""
+        """Constructor.
+
+        Args:
+            tables: The tables the relation protects, in the representation
+                ``backend`` carries tables in.
+            output_measure: The privacy measure the accountant will use.
+                Together with the relation, this fixes ``d_in``.
+            backend: The backend whose domains describe ``tables``. This is the
+                one place where the accountant's input domain is minted, so the
+                backend chosen here is the backend the whole Session runs on.
+        """
         self.tables = tables
         self.output_measure = output_measure
+        self.backend = backend
 
     def visit_add_remove_rows(self, relation: AddRemoveRows) -> Output:
         """Build Core state from ``AddRemoveRows`` neighboring relation."""
         metric = SymmetricDifference()
         distance = ExactNumber(relation.n)
         data = self.tables[relation.table]
-        domain = SparkDataFrameDomain.from_spark_schema(data.schema)
+        domain = self.backend.domain_from_dataframe(data)
         return self.Output(domain, metric, distance, data)
 
     def visit_add_remove_rows_across_groups(
@@ -136,7 +158,7 @@ class NeighboringRelationCoreVisitor(NeighboringRelationVisitor):
 
         metric = IfGroupedBy([relation.grouping_column], agg_metric)
         data = self.tables[relation.table]
-        domain = SparkDataFrameDomain.from_spark_schema(data.schema)
+        domain = self.backend.domain_from_dataframe(data)
         return self.Output(domain, metric, distance, data)
 
     def visit_add_remove_keys(self, relation: AddRemoveKeys) -> Output:
@@ -148,10 +170,10 @@ class NeighboringRelationCoreVisitor(NeighboringRelationVisitor):
         for table_name, key_column in relation.table_to_key_column.items():
             table_id = _RelationIDVisitor().visit_str(table_name)
             data = self.tables[table_name]
-            domain_dict[table_id] = SparkDataFrameDomain.from_spark_schema(data.schema)
+            domain_dict[table_id] = self.backend.domain_from_dataframe(data)
             metric_dict[table_id] = key_column
             data_dict[table_id] = data
-        domain_dict = _ensure_valid_schema_ark(metric_dict, domain_dict)
+        domain_dict = _ensure_valid_schema_ark(metric_dict, domain_dict, self.backend)
         return self.Output(
             DictDomain(domain_dict), CoreAddRemoveKeys(metric_dict), distance, data_dict
         )
