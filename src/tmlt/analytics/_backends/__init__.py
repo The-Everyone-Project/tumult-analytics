@@ -29,6 +29,7 @@ from tmlt.core.domains.spark_domains import (
 
 from tmlt.analytics._backends._base import (
     DATAFRAME_DOMAIN_TYPES,
+    FEATURE_MATRIX_HINT,
     AnyDataFrame,
     Backend,
     BackendUnavailable,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DATAFRAME_DOMAIN_TYPES",
+    "FEATURE_MATRIX_HINT",
     "PANDAS",
     "SPARK",
     "AnyDataFrame",

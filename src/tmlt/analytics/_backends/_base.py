@@ -135,11 +135,24 @@ def pandas_domain_from_dataframe(dataframe: AnyDataFrame) -> Domain:
     )
 
 
+FEATURE_MATRIX_HINT = "See the backend feature matrix in the documentation."
+"""The last sentence of every "this backend cannot do that" message.
+
+Every :class:`NotSupportedByBackend` built through
+:meth:`NotSupportedByBackend.for_op` ends with this, so that a user who hits one
+is always pointed at the one page that says what each backend can do. It is a
+constant rather than prose written at each raise site so that the sentence stays
+identical everywhere, and so that changing where the matrix lives is one edit --
+grep for ``FEATURE_MATRIX_HINT`` to find every message that promises it.
+"""
+
+
 class NotSupportedByBackend(NotImplementedError):
     """An operation the backend in use cannot perform.
 
     Raised by :meth:`Backend.require` when the requested :class:`Ops` slot is
-    ``None``. It subclasses :class:`NotImplementedError` so that callers who
+    ``None``, and by the compiler's gate on query features a backend has no way
+    to answer. It subclasses :class:`NotImplementedError` so that callers who
     already catch that keep working.
     """
 
@@ -167,6 +180,9 @@ class NotSupportedByBackend(NotImplementedError):
     ) -> "NotSupportedByBackend":
         """Build the standard "this backend has no such operation" error.
 
+        This is the one template every such message is built from: it names the
+        feature, names the backend, and ends with :data:`FEATURE_MATRIX_HINT`.
+
         Args:
             op: The name of the unsupported operation.
             backend: The name of the backend that does not support it.
@@ -176,7 +192,7 @@ class NotSupportedByBackend(NotImplementedError):
         message = f"{op} is not supported by the {backend} backend."
         if hint is not None:
             message = f"{message} {hint}"
-        return cls(message, op=op, backend=backend)
+        return cls(f"{message} {FEATURE_MATRIX_HINT}", op=op, backend=backend)
 
 
 class BackendUnavailable(ImportError):
