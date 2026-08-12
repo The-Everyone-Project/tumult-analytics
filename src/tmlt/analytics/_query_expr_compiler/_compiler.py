@@ -115,8 +115,7 @@ class QueryExprCompiler:
         """Return the distance measure for the measurement's output."""
         return self._output_measure
 
-    @staticmethod
-    def query_schema(query: QueryExpr, catalog: Catalog) -> Schema:
+    def query_schema(self, query: QueryExpr, catalog: Catalog) -> Schema:
         """Return the schema created by a given query.
 
         Every entry point into compilation comes through here -- ``evaluate``
@@ -125,14 +124,19 @@ class QueryExprCompiler:
         rejected. It is rejected *before* the schema is computed: validating a
         query is not free (a ``Filter`` checks its condition against a real
         ``SparkSession``), and none of that should happen for a query that was
-        never going to run. The backend comes from the catalog, which is the
-        compiler's statement of what it is compiling against.
+        never going to run.
+
+        The backend checked against is this compiler's own. It used to come from
+        the catalog, which was a second place the answer was written down and so
+        a second place it could be wrong: a catalog constructed without one says
+        Spark, and a pandas compiler handed such a catalog would have validated
+        the query against Spark's feature set and refused nothing.
 
         Raises:
-            NotSupportedByBackend: If the catalog's backend cannot answer this
+            NotSupportedByBackend: If this compiler's backend cannot answer the
                 query. Nothing has been built and no budget spent when it does.
         """
-        check_supported(query, catalog.backend)
+        check_supported(query, self._backend)
         schema = query.schema(catalog)
         if not isinstance(schema, Schema):
             raise AnalyticsInternalError(

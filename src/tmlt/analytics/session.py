@@ -963,7 +963,7 @@ class Session:
     @property
     def _catalog(self) -> Catalog:
         """Returns a Catalog of tables in the Session."""
-        catalog = Catalog(backend=self._backend)
+        catalog = Catalog()
         for table in self.private_sources:
             catalog.add_private_table(
                 table,

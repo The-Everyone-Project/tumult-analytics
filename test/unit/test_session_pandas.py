@@ -34,6 +34,8 @@ from tmlt.analytics import (
     Session,
 )
 from tmlt.analytics._backends import PANDAS, SPARK, NotSupportedByBackend
+from tmlt.analytics._catalog import Catalog
+from tmlt.analytics._query_expr_compiler import QueryExprCompiler
 from tmlt.analytics._schema import Schema
 from tmlt.analytics._table_identifier import NamedTable
 
@@ -111,10 +113,23 @@ def test_mixed_backend_domain_is_rejected(spark):
         Session(accountant=accountant, public_sources={})
 
 
-def test_catalog_is_built_for_the_session_backend(session: Session):
-    """The catalog the Session hands the compiler names its backend."""
+def test_query_schema_checks_the_compilers_own_backend():
+    """A query is validated against the compiler's backend, not the catalog's.
+
+    A :class:`~tmlt.analytics._catalog.Catalog` records no backend, so there is
+    nothing there for a compiler to be talked out of its own by. It used to hold
+    one that defaulted to Spark, and a pandas compiler handed such a catalog --
+    which is every catalog not built by a Session -- validated its queries
+    against Spark's feature set, and so refused nothing.
+    """
+    catalog = Catalog()
+    catalog.add_private_table("t", _SCHEMA.column_descs, constraints=[])
     # pylint: disable=protected-access
-    assert session._catalog.backend is PANDAS
+    query = QueryBuilder("t").filter("A = 'a'")._query_expr
+    with pytest.raises(NotSupportedByBackend) as excinfo:
+        QueryExprCompiler(PureDP(), backend=PANDAS).query_schema(query, catalog)
+    assert excinfo.value.op == "Filter"
+    assert excinfo.value.backend == "pandas"
 
 
 def test_get_schema_routes_through_the_backend(session: Session):
