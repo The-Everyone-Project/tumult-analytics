@@ -240,7 +240,7 @@ def _generate_constrained_count_distinct(
     """
     columns_to_count = set(query.columns_to_count or schema.columns)
     if isinstance(query.groupby_keys, KeySet):
-        groupby_columns = query.groupby_keys.dataframe().columns
+        groupby_columns = query.groupby_keys.columns()
     else:
         groupby_columns = list(query.groupby_keys)
 
@@ -451,10 +451,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         if keyset is None:
             raise AnalyticsInternalError("No keyset provided.")
         if isinstance(keyset, KeySet):
-            if tuple(keyset.dataframe().columns) != columns:
+            if tuple(keyset.columns()) != columns:
                 raise AnalyticsInternalError(
-                    f"Keyset columns {keyset.dataframe().columns} do not match "
-                    f"columns {columns}."
+                    f"Keyset columns {keyset.columns()} do not match columns {columns}."
                 )
 
         def perform_groupby_agg(
@@ -814,8 +813,6 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             return PostProcess(keyset_measurement, process_function)
 
         else:
-            columns = keyset_or_columns.dataframe().columns
-
             if isinstance(budget, PureDPBudget):
                 if budget.epsilon != 0:
                     raise AnalyticsInternalError(
@@ -876,7 +873,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -960,7 +957,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1081,7 +1078,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1175,7 +1172,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1270,7 +1267,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1365,7 +1362,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1460,7 +1457,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1551,7 +1548,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
