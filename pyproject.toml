@@ -281,6 +281,18 @@ markers = [
 # Avoids an re-import issue with serializers. See tumult-labs/tumult#3343 for
 # more information and a better future fix.
 addopts = ["--import-mode=importlib"]
+# NOTE (The-Everyone-Project fork): puts the repository root on sys.path, so that
+# the test tree's own shared modules -- `test.backend_testing`, the
+# backend-parity harness -- can be imported by name from a conftest or a test.
+#
+# `--import-mode=importlib` deliberately does not touch sys.path, which leaves
+# `test` resolving to the *standard library's* `test` package: `test.<anything>`
+# is then importable only when pytest happens to have already imported that exact
+# file as a conftest or a test module. (That is why the pre-existing
+# `from test.conftest import create_empty_input` works, while an import of a
+# shared non-test module fails.) One line here is pytest's documented fix, and it
+# only restores what the default "prepend" import mode would do anyway.
+pythonpath = ["."]
 
 [tool.coverage.run]
 relative_files = true
