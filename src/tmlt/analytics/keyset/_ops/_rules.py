@@ -14,6 +14,7 @@ from ._cross_join import CrossJoin, InMemoryCrossJoin
 from ._detect import Detect
 from ._filter import Filter
 from ._from_dataframe import FromSparkDataFrame
+from ._from_pandas import FromPandasDataFrame
 from ._from_tuples import FromTuples
 from ._join import Join
 from ._project import Project
@@ -38,7 +39,9 @@ def depth_first(func: Callable[[KeySetOp], KeySetOp]) -> Callable[[KeySetOp], Ke
 
     @wraps(func)
     def wrapped(op: KeySetOp) -> KeySetOp:
-        if isinstance(op, (Detect, FromTuples, FromSparkDataFrame)):
+        if isinstance(
+            op, (Detect, FromTuples, FromSparkDataFrame, FromPandasDataFrame)
+        ):
             return func(op)
         elif isinstance(op, CrossJoin):
             return func(type(op)(tuple(wrapped(f) for f in op.factors)))
@@ -88,7 +91,9 @@ def breadth_first(
         if new_op != op:
             return wrapped(new_op)
 
-        if isinstance(new_op, (Detect, FromTuples, FromSparkDataFrame)):
+        if isinstance(
+            new_op, (Detect, FromTuples, FromSparkDataFrame, FromPandasDataFrame)
+        ):
             return new_op
         elif isinstance(new_op, CrossJoin):
             return type(new_op)(tuple(wrapped(f) for f in new_op.factors))

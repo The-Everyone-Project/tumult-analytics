@@ -263,10 +263,17 @@ class Ops(NamedTuple):
     create_bounds_measurement: Optional[Op] = None
     create_partition_selection_measurement: Optional[Op] = None
 
-    # TODO(#keyset-backend): the KeySet materialization operations (building a
+    # TODO(#keyset-backend): the compiler's own KeySet helpers (building a
     # sample keyset for noise info, sampling one, and suppress-below) still name
-    # Spark directly; they move behind this table with the rest of the KeySet
-    # work rather than being guessed at here.
+    # Spark directly, and move behind this table when they are ported.
+    #
+    # Materializing a KeySet is not among them and never will be: the
+    # implementations are the KeySet operations themselves, and they live in
+    # :mod:`tmlt.analytics.keyset`, which imports this module for the descriptor.
+    # A slot here holding them would close that loop. A backend instead declares
+    # the frame type it carries, in `dataframe_type` below, and
+    # :mod:`tmlt.analytics.keyset._ops._frames` reads the choice off that -- see
+    # its module docstring.
 
 
 @dataclass(frozen=True)

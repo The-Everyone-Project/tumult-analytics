@@ -11,6 +11,11 @@ Changelog
 Unreleased
 ----------
 
+Added
+~~~~~
+- :meth:`.KeySet.to_pandas`, which materializes a KeySet's keys as a pandas dataframe rather than a Spark one.
+- :meth:`.KeySet.from_pandas`, the in-memory counterpart of :meth:`.KeySet.from_dataframe`. Unlike that method, it copies the dataframe it is given, and the KeySet it returns can be materialized on either backend.
+
 .. _v0.21.0:
 
 0.21.0 - 2026-06-30
