@@ -894,6 +894,9 @@ class Session:
     @property
     def _catalog(self) -> Catalog:
         """Returns a Catalog of tables in the Session."""
+        # TODO(#session-backend): the Session has no backend of its own yet, so
+        # the catalog it rebuilds on each access gets the SPARK default. When
+        # the Session gains one, pass it here: Catalog(backend=self._backend).
         catalog = Catalog()
         for table in self.private_sources:
             catalog.add_private_table(

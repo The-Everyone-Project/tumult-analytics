@@ -17,6 +17,7 @@ from tmlt.core.metrics import DictMetric
 from tmlt.core.transformations.base import Transformation
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._catalog import Catalog
 from tmlt.analytics._noise_info import NoiseInfo
 from tmlt.analytics._query_expr import QueryExpr
@@ -72,11 +73,17 @@ class QueryExprCompiler:
     * :class:`~tmlt.analytics._query_expr.GroupByQuantile`
     """
 
-    def __init__(self, output_measure: Union[PureDP, ApproxDP, RhoZCDP] = PureDP()):
+    def __init__(
+        self,
+        output_measure: Union[PureDP, ApproxDP, RhoZCDP] = PureDP(),
+        *,
+        backend: Backend = SPARK,
+    ):
         """Constructor.
 
         Args:
             output_measure: Distance measure for measurement's output.
+            backend: The backend to compile the query for.
         """
         # TODO(#1547): Can be removed when issue is resolved.
         self._mechanism = (
@@ -85,6 +92,12 @@ class QueryExprCompiler:
             else CoreNoiseMechanism.DISCRETE_GAUSSIAN
         )
         self._output_measure = output_measure
+        self._backend = backend
+
+    @property
+    def backend(self) -> Backend:
+        """Return the backend this compiler targets."""
+        return self._backend
 
     @property
     def mechanism(self) -> CoreNoiseMechanism:
@@ -150,6 +163,7 @@ class QueryExprCompiler:
             output_measure=self._output_measure,
             default_mechanism=self._mechanism,
             catalog=catalog,
+            backend=self._backend,
         )
 
         measurement, noise_info = query.accept(visitor)
@@ -214,6 +228,7 @@ class QueryExprCompiler:
             input_metric=input_metric,
             mechanism=self.mechanism,
             catalog=catalog,
+            backend=self._backend,
         )
         transformation, reference, constraints = query.accept(transformation_visitor)
         if not isinstance(transformation, Transformation):

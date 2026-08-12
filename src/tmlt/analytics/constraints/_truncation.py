@@ -11,7 +11,6 @@ column.
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Union
 
-from tmlt.core.domains.spark_domains import SparkDataFrameDomain
 from tmlt.core.metrics import (
     AddRemoveKeys,
     IfGroupedBy,
@@ -24,21 +23,16 @@ from tmlt.core.transformations.dictionary import (
     AugmentDictTransformation,
     CreateDictFromValue,
 )
-from tmlt.core.transformations.spark_transformations.add_remove_keys import (
-    LimitKeysPerGroupValue,
-    LimitRowsPerGroupValue,
-    LimitRowsPerKeyPerGroupValue,
-)
-from tmlt.core.transformations.spark_transformations.truncation import (
-    LimitKeysPerGroup,
-    LimitRowsPerGroup,
-    LimitRowsPerKeyPerGroup,
-)
 from typeguard import check_type
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import DATAFRAME_DOMAIN_TYPES, backend_for_domain
 from tmlt.analytics._table_identifier import TemporaryTable
-from tmlt.analytics._table_reference import TableReference, lookup_metric
+from tmlt.analytics._table_reference import (
+    TableReference,
+    lookup_domain,
+    lookup_metric,
+)
 from tmlt.analytics._transformation_utils import (
     generate_nested_transformation,
     get_table_from_ref,
@@ -115,10 +109,14 @@ class MaxRowsPerID(Constraint):
                 "the AddRowsWithID protected change."
             )
 
+        backend = backend_for_domain(
+            lookup_domain(child_transformation.output_domain, child_ref)
+        )
+
         if update_metric:
             target_table = TemporaryTable()
             transformation = get_table_from_ref(child_transformation, child_ref)
-            if not isinstance(transformation.output_domain, SparkDataFrameDomain):
+            if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
                 raise AnalyticsInternalError(
                     "Expected MaxRowsPerID to return a SparkDataFrameDomain, but got "
                     f"{transformation.output_domain} instead."
@@ -128,7 +126,7 @@ class MaxRowsPerID(Constraint):
                     "Expected MaxRowsPerID to return an IfGroupedBy metric, but got "
                     f"{transformation.output_metric} instead."
                 )
-            transformation |= LimitRowsPerGroup(
+            transformation |= backend.require("LimitRowsPerGroup")(
                 transformation.output_domain,
                 SymmetricDifference(),
                 transformation.output_metric.columns,
@@ -147,7 +145,7 @@ class MaxRowsPerID(Constraint):
         else:
 
             def gen_transformation_ark(parent_domain, parent_metric, target):
-                return LimitRowsPerGroupValue(
+                return backend.require("LimitRowsPerGroupValue")(
                     parent_domain, parent_metric, child_ref.identifier, target, self.max
                 )
 
@@ -190,6 +188,10 @@ class MaxGroupsPerID(Constraint):
         update_metric: bool = False,
         use_l2: bool = False,
     ) -> Tuple[Transformation, TableReference]:
+        backend = backend_for_domain(
+            lookup_domain(child_transformation.output_domain, child_ref)
+        )
+
         if update_metric:
             parent_metric = lookup_metric(
                 child_transformation.output_metric, child_ref.parent
@@ -202,7 +204,7 @@ class MaxGroupsPerID(Constraint):
 
             target_table = TemporaryTable()
             transformation = get_table_from_ref(child_transformation, child_ref)
-            if not isinstance(transformation.output_domain, SparkDataFrameDomain):
+            if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
                 raise AnalyticsInternalError(
                     "Expected MaxGroupsPerID to return a SparkDataFrameDomain, but got "
                     f"{transformation.output_domain} instead."
@@ -235,7 +237,7 @@ class MaxGroupsPerID(Constraint):
                     )
                 )
 
-            transformation |= LimitKeysPerGroup(
+            transformation |= backend.require("LimitKeysPerGroup")(
                 transformation.output_domain,
                 IfGroupedBy([self.grouping_column], inner_metric),
                 transformation.output_metric.columns,
@@ -255,7 +257,7 @@ class MaxGroupsPerID(Constraint):
         else:
 
             def gen_transformation_ark(parent_domain, parent_metric, target):
-                return LimitKeysPerGroupValue(
+                return backend.require("LimitKeysPerGroupValue")(
                     parent_domain,
                     parent_metric,
                     child_ref.identifier,
@@ -300,10 +302,14 @@ class MaxRowsPerGroupPerID(Constraint):
         child_ref: TableReference,
         update_metric: bool = False,
     ) -> Tuple[Transformation, TableReference]:
+        backend = backend_for_domain(
+            lookup_domain(child_transformation.output_domain, child_ref)
+        )
+
         if update_metric:
             target_table = TemporaryTable()
             transformation = get_table_from_ref(child_transformation, child_ref)
-            if not isinstance(transformation.output_domain, SparkDataFrameDomain):
+            if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
                 raise AnalyticsInternalError(
                     "Expected MaxRowsPerGroupPerID to return a SparkDataFrameDomain, "
                     f"but got {transformation.output_domain} instead."
@@ -330,7 +336,7 @@ class MaxRowsPerGroupPerID(Constraint):
                     "metric, but got a(n) "
                     f"{transformation.output_metric.inner_metric.inner_metric} instead."
                 )
-            transformation |= LimitRowsPerKeyPerGroup(
+            transformation |= backend.require("LimitRowsPerKeyPerGroup")(
                 transformation.output_domain,
                 transformation.output_metric,
                 transformation.output_metric.inner_metric.inner_metric.columns,
@@ -359,7 +365,7 @@ class MaxRowsPerGroupPerID(Constraint):
                 )
 
             def gen_transformation_ark(parent_domain, parent_metric, target):
-                return LimitRowsPerKeyPerGroupValue(
+                return backend.require("LimitRowsPerKeyPerGroupValue")(
                     parent_domain,
                     parent_metric,
                     child_ref.identifier,
