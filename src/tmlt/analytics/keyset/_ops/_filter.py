@@ -5,14 +5,22 @@
 
 import textwrap
 from dataclasses import dataclass
-from typing import Literal, Optional, Union, overload
+from typing import Literal, NoReturn, Optional, Union, overload
 
 from pyspark.sql import Column, DataFrame
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._schema import ColumnDescriptor
 
 from ._base import KeySetOp
+from ._frames import (
+    FrameKind,
+    frame_count,
+    frame_is_empty,
+    frame_kind,
+    unsupported,
+)
 
 
 @dataclass(frozen=True)
@@ -41,39 +49,68 @@ class Filter(KeySetOp):
         """Get the schema of the output of this operation."""
         return self.child.schema()
 
-    def dataframe(self) -> DataFrame:
+    def children(self) -> tuple[KeySetOp, ...]:
+        """The operations whose outputs this one is computed from."""
+        return (self.child,)
+
+    def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.
 
         This operation may be computationally expensive, even though the full
         dataframe is not evaluated until it is used elsewhere.
         """
-        return self.child.dataframe().filter(self.condition)
+        return self.child._spark_dataframe().filter(self.condition)
 
-    def is_empty(self) -> bool:
+    def _pandas_dataframe(self) -> NoReturn:
+        """Raises: a filter condition can only be evaluated by Spark.
+
+        See :meth:`unsupported_ops`.
+        """
+        raise unsupported(
+            self,
+            FrameKind.PANDAS,
+            "A KeySet filter condition is a Spark SQL expression; build the"
+            " filtered KeySet with KeySet.from_tuples instead.",
+        )
+
+    def unsupported_ops(self, backend: Backend) -> set[str]:
+        """The names of the operations in this op-tree the backend cannot perform.
+
+        A filter condition is a Spark SQL expression or a
+        :class:`~pyspark.sql.Column`, and evaluating one means asking Spark. It
+        is a piece of Spark the user wrote, not a piece Analytics chose, so
+        there is nothing to translate it into.
+        """
+        unsupported_ops = super().unsupported_ops(backend)
+        if frame_kind(backend) is FrameKind.PANDAS:
+            unsupported_ops.add(type(self).__name__)
+        return unsupported_ops
+
+    def is_empty(self, backend: Backend = SPARK) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty.
 
         This operation may be expensive.
         """
-        return self.dataframe().isEmpty()
+        return frame_is_empty(self.dataframe(backend))
 
     def is_plan(self) -> bool:
         """Determine whether this plan has any parts requiring partition selection."""
         return self.child.is_plan()
 
     @overload
-    def size(self, fast: Literal[True]) -> Optional[int]: ...
+    def size(self, fast: Literal[True], backend: Backend = SPARK) -> Optional[int]: ...
 
     @overload
-    def size(self, fast: Literal[False]) -> int: ...
+    def size(self, fast: Literal[False], backend: Backend = SPARK) -> int: ...
 
     @overload
-    def size(self, fast: bool) -> Optional[int]: ...
+    def size(self, fast: bool, backend: Backend = SPARK) -> Optional[int]: ...
 
-    def size(self, fast):
+    def size(self, fast, backend=SPARK):
         """Determine the size of the KeySet resulting from this operation."""
         if fast:
             return None
-        return self.dataframe().count()
+        return frame_count(self.dataframe(backend))
 
     def __str__(self):
         """Human-readable string representation."""
