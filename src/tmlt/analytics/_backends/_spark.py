@@ -106,7 +106,12 @@ from tmlt.core.transformations.spark_transformations.truncation import (
     LimitRowsPerKeyPerGroup,
 )
 
-from tmlt.analytics._backends._base import Backend, Ops, spark_domain_from_dataframe
+from tmlt.analytics._backends._base import (
+    Backend,
+    Ops,
+    spark_domain_from_dataframe,
+    spark_suppress_below,
+)
 from tmlt.analytics._coerce_spark_schema import coerce_spark_schema_or_fail
 from tmlt.analytics._schema import (
     Schema,
@@ -253,5 +258,6 @@ SPARK = Backend(
     coerce_schema_or_fail=coerce_spark_schema_or_fail,
     sample_keyset=_spark_sample_keyset,
     domain_from_dataframe=spark_domain_from_dataframe,
+    suppress_below=spark_suppress_below,
 )
 """The Spark backend, and the default everywhere a backend can be chosen."""

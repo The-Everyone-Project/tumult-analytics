@@ -483,23 +483,12 @@ def test_evaluating_twice_spends_the_budget_twice():
 
 
 ###############################################################################
-# (e) Suppression: a gap, pinned so that closing it is noticed.
+# (e) Suppression, through Backend.suppress_below. The pandas implementation
+# must not reuse the Spark spelling: pandas' DataFrame.filter selects columns
+# by label, so the Spark one-liner silently returns every row and no columns.
 ###############################################################################
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The suppression post-processor in _base_measurement_visitor is written"
-        " in Spark: `df.filter(df[column] >= threshold)`. pandas has a"
-        " `DataFrame.filter` too, but it selects *columns* by label, so on a"
-        " pandas answer it does not raise -- it returns a frame with every row"
-        " and no columns. There is no ops-table slot to bind: suppression is a"
-        " postprocessing function rather than a Core class, and giving it a"
-        " backend is a change to the seam, not a binding. Delete this marker"
-        " when that lands."
-    ),
-)
 def test_suppress_below_threshold():
     """Suppression drops the groups whose count is under the threshold."""
     session = _session(RhoZCDPBudget(INF))

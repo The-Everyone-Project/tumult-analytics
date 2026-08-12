@@ -1589,8 +1589,15 @@ class BaseMeasurementVisitor(QueryExprVisitor):
                 f"{type(child_measurement)} instead."
             )
 
-        def suppression_function(df: DataFrame) -> DataFrame:
+        # Bound outside the closure so the measurement carries the backend it
+        # was compiled for, not whatever `self` looks like when it runs. The
+        # dispatch matters: pandas' DataFrame.filter selects *columns by
+        # label*, so the Spark spelling silently returns every row and no
+        # columns there instead of suppressing.
+        suppress_below = self.backend.suppress_below
+
+        def suppression_function(df):
             """Suppress rows where the column is less than the desired threshold."""
-            return df.filter(df[expr.column] >= expr.threshold)
+            return suppress_below(df, expr.column, expr.threshold)
 
         return (PostProcess(child_measurement, suppression_function), noise_info)

@@ -259,20 +259,6 @@ module = "test.*"
 disallow_untyped_defs = false
 check_untyped_defs = true
 
-# NOTE (The-Everyone-Project fork): the neighboring relations now accept a
-# pandas DataFrame as well as a Spark one, so their `dfs` parameter is annotated
-# with `AnyDataFrame`. pandas ships no `py.typed` marker, so `pd.DataFrame` --
-# and therefore that union -- is `Any` to mypy, which makes the `# type: ignore`
-# comments on this module's two deliberately-wrong-typed calls unused.
-#
-# The real fix is to delete those two comments; this override exists only
-# because the branch that widened the annotation was not allowed to touch
-# existing test files. Delete both the comments and this override together, or
-# add `pandas-stubs` to the mypy session, which would make the union strict
-# again and the comments necessary again.
-[[tool.mypy.overrides]]
-module = "test.unit.test_neighboring_relations"
-
 # pandas ships no py.typed marker, so `pandas.DataFrame` is `Any` to mypy, and a
 # parameter annotated `Union[pyspark.sql.DataFrame, pandas.DataFrame]` -- which
 # is what the builder takes now that it accepts either backend's tables --

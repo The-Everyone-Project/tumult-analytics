@@ -50,6 +50,7 @@ from tmlt.analytics._backends._base import (
     BackendUnavailable,
     Ops,
     pandas_domain_from_dataframe,
+    pandas_suppress_below,
 )
 from tmlt.analytics._coerce_pandas_schema import coerce_pandas_schema_or_fail
 from tmlt.analytics._schema import (
@@ -330,5 +331,6 @@ PANDAS = Backend(
     coerce_schema_or_fail=coerce_pandas_schema_or_fail,
     sample_keyset=_pandas_sample_keyset,
     domain_from_dataframe=pandas_domain_from_dataframe,
+    suppress_below=pandas_suppress_below,
 )
 """The pandas backend: Analytics on in-memory frames, without Spark."""

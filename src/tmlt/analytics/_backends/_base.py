@@ -135,6 +135,33 @@ def pandas_domain_from_dataframe(dataframe: AnyDataFrame) -> Domain:
     )
 
 
+def spark_suppress_below(
+    dataframe: AnyDataFrame, column: str, threshold: Any
+) -> AnyDataFrame:
+    """Drop the rows whose ``column`` value falls below ``threshold``.
+
+    This is :attr:`Backend.suppress_below` for the Spark backend.
+    """
+    df = cast(SparkDataFrame, dataframe)
+    return df.filter(df[column] >= threshold)
+
+
+def pandas_suppress_below(
+    dataframe: AnyDataFrame, column: str, threshold: Any
+) -> AnyDataFrame:
+    """Drop the rows whose ``column`` value falls below ``threshold``.
+
+    This is :attr:`Backend.suppress_below` for the pandas backend, for the
+    pandas :class:`Backend` to bind. The Spark spelling must not be reused
+    here: ``pandas.DataFrame.filter`` selects *columns by label*, so handing it
+    a boolean Series silently returns every row and no columns instead of
+    suppressing. The surviving rows are reindexed from zero, the convention
+    every pandas measurement output already follows.
+    """
+    df = cast(pd.DataFrame, dataframe)
+    return df[df[column] >= threshold].reset_index(drop=True)
+
+
 class NotSupportedByBackend(NotImplementedError):
     """An operation the backend in use cannot perform.
 
@@ -385,6 +412,20 @@ class Backend:
     who says nothing gets Spark; a non-Spark backend must bind it, and will fail
     loudly on the first call if it does not, since no other backend's tables
     have the ``.schema`` the Spark implementation reads.
+    """
+
+    suppress_below: Callable[[AnyDataFrame, str, Any], AnyDataFrame] = (
+        spark_suppress_below
+    )
+    """Drops an answer frame's rows whose named column falls below a threshold.
+
+    The postprocessing step of ``GroupbyCountQuery.suppress``. It is a Backend
+    field rather than shared visitor code because the one-line spelling is an
+    engine idiom: Spark's ``DataFrame.filter`` takes a row predicate, while
+    pandas' method of the same name selects columns by label -- reusing the
+    Spark spelling on a pandas frame silently returns every row and no columns.
+    Defaulted to the Spark implementation for the same reason as
+    :attr:`domain_from_dataframe`.
     """
 
     def require(self, op_name: str) -> Op:
