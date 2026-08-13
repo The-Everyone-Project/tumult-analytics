@@ -6,13 +6,13 @@ Copyright Tumult Labs 2026
 # Cutting a fork release of tmlt.analytics
 
 How to turn a commit of this branch into the wheel that the Difference Engine
-installs by URL. It describes producing `0.21.0+ep.backend.2`, and is the
+installs by URL. It describes producing `0.21.0+ep.backend.3`, and is the
 counterpart of `RELEASING-ep-backend.md` in the Core fork — read that one too if
 you are cutting both, because the Core wheel set has to exist first (see
 [The Core build this needs](#the-core-build-this-needs)).
 
 Nothing here publishes to PyPI, and nothing here should. The fork's version is a
-PEP 440 *local version* (`0.21.0+ep.backend.2`); PyPI structurally rejects those,
+PEP 440 *local version* (`0.21.0+ep.backend.3`); PyPI structurally rejects those,
 which is exactly why the scheme was chosen — a fork build can never be mistaken
 for, or shadowed by, an upstream release.
 
@@ -34,8 +34,8 @@ uv build
 which produces the two artifacts a release needs, on any platform:
 
 ```
-dist/tmlt_analytics-0.21.0+ep.backend.2-py3-none-any.whl
-dist/tmlt_analytics-0.21.0+ep.backend.2.tar.gz
+dist/tmlt_analytics-0.21.0+ep.backend.3-py3-none-any.whl
+dist/tmlt_analytics-0.21.0+ep.backend.3.tar.gz
 ```
 
 Check the wheel before you attach it anywhere:
@@ -115,17 +115,17 @@ The tag is the version with `+` and `.` turned into `-`:
 
 | Version | Tag |
 | --- | --- |
-| `0.21.0+ep.backend.2` | `0.21.0-ep-backend-2` |
+| `0.21.0+ep.backend.3` | `0.21.0-ep-backend-3` |
 
 `nox -s make-release` is not usable here: it insists on a semantic version, on the
 `main` branch, and it rewrites the changelog. Tag by hand, annotated and signed,
 following the convention the Core fork's tags use:
 
 ```sh
-git tag -s 0.21.0-ep-backend-2 -m "tmlt.analytics 0.21.0+ep.backend.2" -m \
+git tag -s 0.21.0-ep-backend-3 -m "tmlt.analytics 0.21.0+ep.backend.3" -m \
 "Tumult Analytics 0.21.0 (plus upstream PR #135) with the pandas backend,
 work packages A1-A10. Not an official Tumult Labs release; never on PyPI."
-git push origin 0.21.0-ep-backend-2
+git push origin 0.21.0-ep-backend-3
 ```
 
 Pushing the tag builds nothing, and that is fine here. Every job in
@@ -138,11 +138,11 @@ those jobs: the wheel is pure Python and you have already built it locally.
 ## Step 2: create the release and attach the wheel
 
 ```sh
-gh release create 0.21.0-ep-backend-2 \
-  --title "tmlt.analytics 0.21.0+ep.backend.2" \
+gh release create 0.21.0-ep-backend-3 \
+  --title "tmlt.analytics 0.21.0+ep.backend.3" \
   --notes "Fork build with the pandas backend. Not an official Tumult Labs release; never on PyPI." \
-  dist/tmlt_analytics-0.21.0+ep.backend.2-py3-none-any.whl \
-  dist/tmlt_analytics-0.21.0+ep.backend.2.tar.gz
+  dist/tmlt_analytics-0.21.0+ep.backend.3-py3-none-any.whl \
+  dist/tmlt_analytics-0.21.0+ep.backend.3.tar.gz
 ```
 
 The wheel must be a release *asset*, because the consumer below addresses it by
@@ -163,14 +163,14 @@ for `tmlt.analytics`, mirroring the shape of the Core entry:
 #
 #   fork:     The-Everyone-Project/tumult-analytics
 #   branch:   feature/pandas-backend
-#   tag:      0.21.0-ep-backend-2
+#   tag:      0.21.0-ep-backend-3
 #   contents: 0.21.0 (plus upstream PR #135) plus the pandas backend
 #
-# `0.21.0+ep.backend.2` is a PEP 440 local version: it sorts after `0.21.0`,
+# `0.21.0+ep.backend.3` is a PEP 440 local version: it sorts after `0.21.0`,
 # satisfies the `tmlt.analytics==0.21.0` requirement in
 # difference-engine/pyproject.toml (a public `==` specifier ignores the local
 # segment), and PyPI structurally rejects local versions.
-"tmlt.analytics" = { url = "https://github.com/The-Everyone-Project/tumult-analytics/releases/download/0.21.0-ep-backend-2/tmlt_analytics-0.21.0+ep.backend.2-py3-none-any.whl" }
+"tmlt.analytics" = { url = "https://github.com/The-Everyone-Project/tumult-analytics/releases/download/0.21.0-ep-backend-3/tmlt_analytics-0.21.0+ep.backend.3-py3-none-any.whl" }
 ```
 
 No platform markers: one `py3-none-any` wheel covers every platform, where the
@@ -184,9 +184,9 @@ Two things about that repository must not change while doing this:
   silently. The same reasoning is why `tmlt.analytics` itself must stay listed
   there for the new source to take effect.
 * The Core URLs in the workspace root are repointed to the Core
-  `0.19.1+ep.backend.N` wheel set at the same time. Analytics `+ep.backend.1`
-  against Core `+ep.pandas.1` is the combination described above that imports and
-  then fails.
+  `0.19.1+ep.backend.N` wheel set at the same time. An Analytics `+ep.backend`
+  wheel against Core `+ep.pandas.1` is the combination described above that
+  imports and then fails.
 
 ## Step 4: verify
 
@@ -217,7 +217,7 @@ print(type(answer).__module__, len(answer.index))
 "
 ```
 
-The version must print `0.21.0+ep.backend.2`, and the answer must be a
+The version must print `0.21.0+ep.backend.3`, and the answer must be a
 `pandas.core.frame` dataframe with two rows. If the version prints plain
 `0.21.0`, something resolved the PyPI wheel and the pin is not doing its job; if
 the Session raises `BackendUnavailable`, the installed Core is not the fork's
@@ -226,9 +226,9 @@ integration build.
 ## Notes on the version scheme
 
 * PEP 440 ignores the local segment when matching a specifier, so
-  `0.21.0+ep.backend.2` satisfies `>=0.21.0,<0.22` and `==0.21.0` alike; and
+  `0.21.0+ep.backend.3` satisfies `>=0.21.0,<0.22` and `==0.21.0` alike; and
   `tmlt.core >=0.19.1,<0.20` — this package's own requirement, unchanged from
-  upstream — is satisfied by the Core fork's `0.19.1+ep.backend.1`. That is what
+  upstream — is satisfied by the Core fork's `0.19.1+ep.backend.2`. That is what
   makes both fork builds drop-in.
 * Local segments compare alphanumerically, so `+ep.backend.1` sorts *before*
   `+ep.pandas.1`, which sorts before `0.21.1`. Nothing depends on this — every
