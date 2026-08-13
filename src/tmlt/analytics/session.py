@@ -1510,6 +1510,7 @@ class Session:
                 child_ref=child_ref,
                 update_metric=True,
                 use_l2=isinstance(self._output_measure, RhoZCDP),
+                backend=self._backend,
             )
         else:
             if not isinstance(constraint, MaxRowsPerID):
@@ -1520,6 +1521,7 @@ class Session:
                 child_transformation=child_transformation,
                 child_ref=child_ref,
                 update_metric=True,
+                backend=self._backend,
             )
 
     def _create_partition_transformation(

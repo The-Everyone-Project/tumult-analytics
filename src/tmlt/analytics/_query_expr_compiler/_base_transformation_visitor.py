@@ -1453,7 +1453,9 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = self._visit_child(
             expr.child
         )
-        transformation, ref = expr.constraint._enforce(child_transformation, child_ref)
+        transformation, ref = expr.constraint._enforce(
+            child_transformation, child_ref, backend=self.backend
+        )
 
         return self.Output(
             transformation,

@@ -26,13 +26,9 @@ from tmlt.core.transformations.dictionary import (
 from typeguard import check_type
 
 from tmlt.analytics import AnalyticsInternalError
-from tmlt.analytics._backends import DATAFRAME_DOMAIN_TYPES, backend_for_domain
+from tmlt.analytics._backends import DATAFRAME_DOMAIN_TYPES, SPARK, Backend
 from tmlt.analytics._table_identifier import TemporaryTable
-from tmlt.analytics._table_reference import (
-    TableReference,
-    lookup_domain,
-    lookup_metric,
-)
+from tmlt.analytics._table_reference import TableReference, lookup_metric
 from tmlt.analytics._transformation_utils import (
     generate_nested_transformation,
     get_table_from_ref,
@@ -99,6 +95,8 @@ class MaxRowsPerID(Constraint):
         child_transformation: Transformation,
         child_ref: TableReference,
         update_metric: bool = False,
+        *,
+        backend: Backend = SPARK,
     ) -> Tuple[Transformation, TableReference]:
         parent_metric = lookup_metric(
             child_transformation.output_metric, child_ref.parent
@@ -108,10 +106,6 @@ class MaxRowsPerID(Constraint):
                 "The MaxRowsPerID constraint can only be applied to tables with "
                 "the AddRowsWithID protected change."
             )
-
-        backend = backend_for_domain(
-            lookup_domain(child_transformation.output_domain, child_ref)
-        )
 
         if update_metric:
             target_table = TemporaryTable()
@@ -188,11 +182,9 @@ class MaxGroupsPerID(Constraint):
         child_ref: TableReference,
         update_metric: bool = False,
         use_l2: bool = False,
+        *,
+        backend: Backend = SPARK,
     ) -> Tuple[Transformation, TableReference]:
-        backend = backend_for_domain(
-            lookup_domain(child_transformation.output_domain, child_ref)
-        )
-
         if update_metric:
             parent_metric = lookup_metric(
                 child_transformation.output_metric, child_ref.parent
@@ -303,11 +295,9 @@ class MaxRowsPerGroupPerID(Constraint):
         child_transformation: Transformation,
         child_ref: TableReference,
         update_metric: bool = False,
+        *,
+        backend: Backend = SPARK,
     ) -> Tuple[Transformation, TableReference]:
-        backend = backend_for_domain(
-            lookup_domain(child_transformation.output_domain, child_ref)
-        )
-
         if update_metric:
             target_table = TemporaryTable()
             transformation = get_table_from_ref(child_transformation, child_ref)
