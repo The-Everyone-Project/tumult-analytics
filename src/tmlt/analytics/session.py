@@ -1078,11 +1078,11 @@ class Session:
             dataframe: The public data source corresponding to the ``source_id``.
 
         Raises:
-            NotSupportedByBackend: If this Session is not on the Spark backend.
-                Public tables exist to be joined against, and no other backend
-                has a public join yet.
+            NotSupportedByBackend: If this Session's backend has no join-public.
+                Public tables exist to be joined against, and no backend other
+                than Spark has a public join yet.
         """
-        if self._backend is not SPARK:
+        if self._backend.ops.PublicJoin is None:
             raise NotSupportedByBackend.for_op(
                 "Public tables",
                 self._backend.name,

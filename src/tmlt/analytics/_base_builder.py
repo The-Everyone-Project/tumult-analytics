@@ -134,23 +134,25 @@ class DataFrameMixin:
             raise ValueError(f"Table '{source_id}' already exists")
 
         backend = self.__backend_for(source_id, dataframe)
-        if backend is not SPARK:
-            if self.__public_dataframes:
-                raise NotSupportedByBackend.for_op(
-                    "Public tables",
-                    backend.name,
-                    f"Table '{source_id}' is a {type(dataframe).__name__}, but"
-                    " this builder already has public tables, which only the"
-                    " Spark backend supports.",
-                )
-            if isinstance(protected_change, AddMaxRowsInMaxGroups):
-                raise NotSupportedByBackend.for_op(
-                    "The AddMaxRowsInMaxGroups protected change",
-                    backend.name,
-                    f"Table '{source_id}' cannot use it. Protecting it needs"
-                    " grouped truncation, which this backend does not have yet."
-                    " AddOneRow, AddMaxRows and AddRowsWithID are supported.",
-                )
+        if backend.ops.PublicJoin is None and self.__public_dataframes:
+            raise NotSupportedByBackend.for_op(
+                "Public tables",
+                backend.name,
+                f"Table '{source_id}' is a {type(dataframe).__name__}, but this"
+                " builder already has public tables, and this backend has no"
+                " join-public, so a public table on it could never be read.",
+            )
+        # Unlike the public-table refusal above, this one has no op slot to read:
+        # the backends that lack it lack it in Core's aggregations rather than in
+        # a transformation the compiler would ask for by name.
+        if backend is not SPARK and isinstance(protected_change, AddMaxRowsInMaxGroups):
+            raise NotSupportedByBackend.for_op(
+                "The AddMaxRowsInMaxGroups protected change",
+                backend.name,
+                f"Table '{source_id}' cannot use it. Protecting it needs"
+                " grouped truncation, which this backend does not have yet."
+                " AddOneRow, AddMaxRows and AddRowsWithID are supported.",
+            )
 
         dataframe = backend.coerce_schema_or_fail(dataframe)
         self.__private_dataframes[source_id] = PrivateDataFrame(
@@ -177,9 +179,9 @@ class DataFrameMixin:
         # the message should name whichever it is.
         backend = backend_for_dataframe(dataframe)
         unsupported: Optional[Backend] = None
-        if backend is not SPARK:
+        if backend.ops.PublicJoin is None:
             unsupported = backend
-        elif self.__backend is not None and self.__backend is not SPARK:
+        elif self.__backend is not None and self.__backend.ops.PublicJoin is None:
             unsupported = self.__backend
         if unsupported is not None:
             raise NotSupportedByBackend.for_op(
