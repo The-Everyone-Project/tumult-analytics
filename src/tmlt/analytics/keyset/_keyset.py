@@ -36,6 +36,7 @@ from ._ops._frames import (
     FrameKind,
     KeySetFrame,
     cast_to_schema,
+    frame_count,
     frame_kind,
     frame_rows,
     select_columns,
@@ -578,7 +579,21 @@ class KeySet:
                 materializing the KeySet. The answer does not depend on it.
         """
         if self._size is None:
-            self._size = self._op_tree.size(fast=False, backend=backend)
+            # A frame this KeySet has already built has the answer in it, and
+            # asking the op-tree instead would build a second one -- on pandas,
+            # redoing the whole coerce-and-deduplicate. Which frame does not
+            # matter: both hold the same keys.
+            #
+            # Except for a KeySet with no columns, which is the total
+            # aggregation: it stands for the one group that is the whole table,
+            # and is spelled as a frame with no rows. Its size is one and its
+            # frame's row count is zero, so that one has to be asked of the
+            # op-tree.
+            cached = next(iter(self._dataframes.values()), None)
+            if cached is not None and self.columns():
+                self._size = frame_count(cached)
+            else:
+                self._size = self._op_tree.size(fast=False, backend=backend)
         return self._size
 
     def cache(self) -> None:

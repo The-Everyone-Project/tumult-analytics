@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 from typing import Dict, List, Mapping, Optional, Tuple, Union
+from unittest.mock import patch
 
 import pandas as pd
 import pyspark.sql.functions as sf
@@ -25,6 +26,7 @@ from pyspark.sql.types import (
 from tmlt.core.utils.testing import Case, assert_dataframe_equal, parametrize
 
 from tmlt.analytics import ColumnDescriptor, ColumnType, KeySet
+from tmlt.analytics._backends import PANDAS
 
 
 @pytest.mark.parametrize(
@@ -778,6 +780,33 @@ def test_caching():
 def test_size_from_dict(_, keyset, expected):
     """Tests that the expected KeySet size is returned."""
     assert keyset.size() == expected
+
+
+def test_size_counts_a_frame_it_already_has():
+    """A materialized KeySet is counted rather than built a second time.
+
+    Evaluating the op-tree again would redo the whole coerce-and-deduplicate,
+    for a number the frame already in hand can be asked for.
+    """
+    keyset = KeySet.from_dict({"A": [0, 1], "B": [2, 3, 4]})
+    keyset.to_pandas()
+    with patch.object(
+        type(keyset._op_tree),
+        "size",
+        side_effect=AssertionError("the op-tree was evaluated again"),
+    ):
+        assert keyset.size(PANDAS) == 6
+
+
+def test_size_of_a_materialized_total_aggregation():
+    """A KeySet with no columns is one group, though its frame has no rows.
+
+    So this is the one KeySet whose size its frame does not have in it, and the
+    shortcut above must not be taken for it.
+    """
+    keyset = KeySet.from_dict({})
+    keyset.to_pandas()
+    assert keyset.size(PANDAS) == 1
 
 
 @pytest.mark.parametrize(
