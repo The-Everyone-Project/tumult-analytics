@@ -100,7 +100,7 @@ def _schema(**columns: ColumnDescriptor) -> Schema:
     return Schema(columns)
 
 
-def _integer(*, allow_null: bool) -> ColumnDescriptor:
+def integer(*, allow_null: bool) -> ColumnDescriptor:
     """An ``INTEGER`` column descriptor.
 
     Args:
@@ -112,7 +112,7 @@ def _integer(*, allow_null: bool) -> ColumnDescriptor:
     return ColumnDescriptor(ColumnType.INTEGER, allow_null=allow_null)
 
 
-def _varchar(*, allow_null: bool) -> ColumnDescriptor:
+def varchar(*, allow_null: bool) -> ColumnDescriptor:
     """A ``VARCHAR`` column descriptor.
 
     Args:
@@ -124,7 +124,7 @@ def _varchar(*, allow_null: bool) -> ColumnDescriptor:
     return ColumnDescriptor(ColumnType.VARCHAR, allow_null=allow_null)
 
 
-def _decimal(*, allow_null: bool) -> ColumnDescriptor:
+def decimal(*, allow_null: bool) -> ColumnDescriptor:
     """A ``DECIMAL`` column descriptor.
 
     ``allow_nan`` and ``allow_inf`` are always ``True``, because that is what
@@ -147,11 +147,11 @@ def _decimal(*, allow_null: bool) -> ColumnDescriptor:
 ID1 = TableSpec(
     name="id1",
     schema=_schema(
-        id=_integer(allow_null=True),
-        group=_varchar(allow_null=True),
-        group2=_varchar(allow_null=True),
-        n=_integer(allow_null=True),
-        float_n=_decimal(allow_null=True),
+        id=integer(allow_null=True),
+        group=varchar(allow_null=True),
+        group2=varchar(allow_null=True),
+        n=integer(allow_null=True),
+        float_n=decimal(allow_null=True),
     ),
     rows=(
         (1, "A", "X", 4, 4.0),
@@ -167,9 +167,9 @@ ID1 = TableSpec(
 ID2 = TableSpec(
     name="id2",
     schema=_schema(
-        id=_integer(allow_null=True),
-        group=_varchar(allow_null=True),
-        x=_integer(allow_null=True),
+        id=integer(allow_null=True),
+        group=varchar(allow_null=True),
+        x=integer(allow_null=True),
     ),
     rows=(
         (1, "A", 12),
@@ -185,9 +185,9 @@ ID2 = TableSpec(
 ID3 = TableSpec(
     name="id3",
     schema=_schema(
-        id=_integer(allow_null=True),
-        group=_varchar(allow_null=False),
-        x=_integer(allow_null=True),
+        id=integer(allow_null=True),
+        group=varchar(allow_null=False),
+        x=integer(allow_null=True),
     ),
     rows=(
         (1, "A", 12),
@@ -204,9 +204,9 @@ ID3 = TableSpec(
 ID4 = TableSpec(
     name="id4",
     schema=_schema(
-        id=_integer(allow_null=False),
-        group=_varchar(allow_null=False),
-        x=_integer(allow_null=False),
+        id=integer(allow_null=False),
+        group=varchar(allow_null=False),
+        x=integer(allow_null=False),
     ),
     rows=(
         (1, "A", 12),
@@ -222,9 +222,9 @@ ID4 = TableSpec(
 ROWS1 = TableSpec(
     name="rows1",
     schema=_schema(
-        A=_varchar(allow_null=False),
-        B=_integer(allow_null=False),
-        X=_integer(allow_null=False),
+        A=varchar(allow_null=False),
+        B=integer(allow_null=False),
+        X=integer(allow_null=False),
     ),
     rows=(("0", 0, 0), ("0", 0, 1), ("0", 1, 2), ("1", 0, 3)),
 )
@@ -233,10 +233,10 @@ ROWS1 = TableSpec(
 PRIVATE_ID_DATA = TableSpec(
     name="private_id_data",
     schema=_schema(
-        id=_integer(allow_null=True),
-        A=_integer(allow_null=True),
-        B=_integer(allow_null=True),
-        X=_varchar(allow_null=True),
+        id=integer(allow_null=True),
+        A=integer(allow_null=True),
+        B=integer(allow_null=True),
+        X=varchar(allow_null=True),
     ),
     rows=(
         (1, 4, 100, "X"),

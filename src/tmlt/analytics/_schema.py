@@ -455,30 +455,6 @@ The ``object`` dtype is deliberately absent: it may be either a ``VARCHAR`` or a
 ``DATE`` column, and only its values say which. See
 :func:`~tmlt.analytics._coerce_pandas_schema.object_column_element_type`."""
 
-_ANALYTICS_TO_PANDAS_DTYPE: Dict[str, PandasDtype] = {
-    "INTEGER": np.dtype("int64"),
-    "DECIMAL": np.dtype("float64"),
-    "VARCHAR": np.dtype(object),
-    "DATE": np.dtype(object),
-    "TIMESTAMP": np.dtype("datetime64[ns]"),
-}
-"""Mapping from Analytics column types to the pandas dtype of a non-null column."""
-
-_ANALYTICS_TO_NULLABLE_PANDAS_DTYPE: Dict[str, PandasDtype] = {
-    "INTEGER": pd.Int64Dtype(),
-    "DECIMAL": pd.Float64Dtype(),
-    "VARCHAR": np.dtype(object),
-    "DATE": np.dtype(object),
-    "TIMESTAMP": np.dtype("datetime64[ns]"),
-}
-"""Mapping from Analytics column types to the pandas dtype of a nullable column.
-
-Unlike Spark, where nullability is a property of the field and not of its type,
-pandas represents a nullable integer or float differently from a non-nullable
-one: only the nullable extension dtypes carry the mask a null needs. The other
-three types are unaffected -- an ``object`` column holds ``None`` and a
-``datetime64`` column holds ``NaT`` whatever the descriptor says."""
-
 _ANALYTICS_TYPE_TO_PANDAS_COLUMN_DESCRIPTOR: Dict[ColumnType, type] = {
     ColumnType.INTEGER: PandasIntegerColumnDescriptor,
     ColumnType.DECIMAL: PandasFloatColumnDescriptor,
@@ -492,17 +468,15 @@ More information regarding pandas columns descriptor can be found in
 :class:`~tmlt.core.domains.pandas_domains.PandasColumnDescriptor`"""
 
 _PANDAS_COLUMN_DESCRIPTOR_TO_ANALYTICS: Dict[type, ColumnType] = {
-    PandasIntegerColumnDescriptor: ColumnType.INTEGER,
-    PandasFloatColumnDescriptor: ColumnType.DECIMAL,
-    PandasStringColumnDescriptor: ColumnType.VARCHAR,
-    PandasDateColumnDescriptor: ColumnType.DATE,
-    PandasTimestampColumnDescriptor: ColumnType.TIMESTAMP,
+    descriptor: column_type
+    for column_type, descriptor in _ANALYTICS_TYPE_TO_PANDAS_COLUMN_DESCRIPTOR.items()
 }
 """Mapping from pandas columns descriptor to Analytics column types.
 
-The inverse of :data:`_ANALYTICS_TYPE_TO_PANDAS_COLUMN_DESCRIPTOR`. It is keyed
-by descriptor class rather than by dtype, as the Spark family is, because the
-string and date descriptors both describe an ``object`` column."""
+Derived from :data:`_ANALYTICS_TYPE_TO_PANDAS_COLUMN_DESCRIPTOR` rather than
+written out, so that the two cannot come to disagree. It is keyed by descriptor
+class rather than by dtype, as the Spark family is, because the string and date
+descriptors both describe an ``object`` column."""
 
 
 def column_type_to_py_type(column_type: ColumnType) -> type:
@@ -626,14 +600,16 @@ def analytics_to_pandas_dtypes(analytics_schema: Schema) -> Dict[str, PandasDtyp
     nullable extension dtypes can hold one. A column may validly have another
     dtype; see
     :attr:`~tmlt.core.domains.pandas_domains.PandasColumnDescriptor.accepted_dtypes`.
+
+    Which dtype is canonical is Core's answer, not one restated here: this asks
+    the descriptor :func:`analytics_to_pandas_columns_descriptor` builds, which
+    is the descriptor the domain will validate the column against.
     """
     return {
-        column_name: (
-            _ANALYTICS_TO_NULLABLE_PANDAS_DTYPE[column_desc.column_type.name]
-            if column_desc.allow_null
-            else _ANALYTICS_TO_PANDAS_DTYPE[column_desc.column_type.name]
-        )
-        for column_name, column_desc in analytics_schema.column_descs.items()
+        column_name: descriptor.pandas_dtype
+        for column_name, descriptor in analytics_to_pandas_columns_descriptor(
+            analytics_schema
+        ).items()
     }
 
 

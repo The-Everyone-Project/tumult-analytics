@@ -87,6 +87,9 @@ from test.backend_testing.data import (
     STANDARD_TABLES,
     Row,
     TableSpec,
+    decimal,
+    integer,
+    varchar,
 )
 from test.backend_testing.fixtures import backend
 from test.backend_testing.frames import (
@@ -132,9 +135,11 @@ __all__ = [
     "analytics_columns",
     "assert_frame_equal_across_backends",
     "backend",
+    "decimal",
     "expected_columns",
     "frame_as_rows",
     "frame_for",
+    "integer",
     "is_null_value",
     "nullability_divergences",
     "pandas_dtypes_for",
@@ -144,4 +149,5 @@ __all__ = [
     "spark_frame",
     "to_pandas",
     "value_key",
+    "varchar",
 ]

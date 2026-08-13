@@ -46,7 +46,13 @@ from tmlt.analytics import (
 from tmlt.analytics._schema import ColumnDescriptor, ColumnType, Schema
 from tmlt.analytics.protected_change import ProtectedChange
 
-from test.backend_testing import BackendFixture, TableSpec, spark_frame
+from test.backend_testing import (
+    BackendFixture,
+    TableSpec,
+    integer,
+    spark_frame,
+    varchar,
+)
 
 INF = float("inf")
 
@@ -67,24 +73,6 @@ ID_SPACE = "ids"
 """The one ID space every ``AddRowsWithID`` table here lives in."""
 
 
-def _varchar(*, allow_null: bool) -> ColumnDescriptor:
-    """A ``VARCHAR`` column descriptor.
-
-    Args:
-        allow_null: Whether the column admits nulls.
-    """
-    return ColumnDescriptor(ColumnType.VARCHAR, allow_null=allow_null)
-
-
-def _integer(*, allow_null: bool) -> ColumnDescriptor:
-    """An ``INTEGER`` column descriptor.
-
-    Args:
-        allow_null: Whether the column admits nulls.
-    """
-    return ColumnDescriptor(ColumnType.INTEGER, allow_null=allow_null)
-
-
 ################################################################################
 # The tables
 ################################################################################
@@ -93,9 +81,9 @@ ROWS_SPEC = TableSpec(
     name="parity_rows",
     schema=Schema(
         {
-            "g": _varchar(allow_null=True),
-            "g2": _varchar(allow_null=False),
-            "v": _integer(allow_null=False),
+            "g": varchar(allow_null=True),
+            "g2": varchar(allow_null=False),
+            "v": integer(allow_null=False),
         }
     ),
     rows=(
@@ -121,10 +109,10 @@ ID_SPEC = TableSpec(
     name="parity_ids",
     schema=Schema(
         {
-            "id": _varchar(allow_null=False),
-            "g": _varchar(allow_null=True),
-            "g2": _varchar(allow_null=False),
-            "v": _integer(allow_null=False),
+            "id": varchar(allow_null=False),
+            "g": varchar(allow_null=True),
+            "g2": varchar(allow_null=False),
+            "v": integer(allow_null=False),
         }
     ),
     rows=(
@@ -158,9 +146,9 @@ CHOICE_SPEC = TableSpec(
     name="parity_choice",
     schema=Schema(
         {
-            "id": _varchar(allow_null=False),
-            "g": _varchar(allow_null=False),
-            "v": _integer(allow_null=False),
+            "id": varchar(allow_null=False),
+            "g": varchar(allow_null=False),
+            "v": integer(allow_null=False),
         }
     ),
     rows=(
@@ -194,14 +182,14 @@ a ``count_distinct`` sees the difference too.
 
 JOIN_LEFT_SPEC = TableSpec(
     name="parity_join_left",
-    schema=Schema({"k": _varchar(allow_null=False), "g": _varchar(allow_null=False)}),
+    schema=Schema({"k": varchar(allow_null=False), "g": varchar(allow_null=False)}),
     rows=(("k1", "a"), ("k1", "b"), ("k2", "a"), ("k3", "b")),
 )
 """The left side of the private join. ``k1`` repeats, so truncation applies."""
 
 JOIN_RIGHT_SPEC = TableSpec(
     name="parity_join_right",
-    schema=Schema({"k": _varchar(allow_null=False), "w": _integer(allow_null=False)}),
+    schema=Schema({"k": varchar(allow_null=False), "w": integer(allow_null=False)}),
     rows=(("k1", 10), ("k2", 20), ("k3", 30), ("k4", 40)),
 )
 """The right side of the private join.
@@ -214,7 +202,7 @@ answers independent of which rows they keep: ``DropNonUnique`` drops the left's
 
 ARK_JOIN_LEFT_SPEC = TableSpec(
     name="parity_ark_join_left",
-    schema=Schema({"id": _varchar(allow_null=False), "g": _varchar(allow_null=False)}),
+    schema=Schema({"id": varchar(allow_null=False), "g": varchar(allow_null=False)}),
     rows=(("i1", "a"), ("i1", "b"), ("i2", "a"), ("i3", "b")),
 )
 """The left side of the join between two ``AddRowsWithID`` tables."""
@@ -223,9 +211,9 @@ FEATURES_SPEC = TableSpec(
     name="parity_features",
     schema=Schema(
         {
-            "id": _varchar(allow_null=False),
-            "g": _varchar(allow_null=False),
-            "v": _integer(allow_null=False),
+            "id": varchar(allow_null=False),
+            "g": varchar(allow_null=False),
+            "v": integer(allow_null=False),
             "f": ColumnDescriptor(
                 ColumnType.DECIMAL, allow_null=True, allow_nan=True, allow_inf=True
             ),
@@ -256,7 +244,7 @@ suite that cares about values.
 FEATURES_PUBLIC_SPEC = TableSpec(
     name="parity_features_public",
     schema=Schema(
-        {"g": _varchar(allow_null=False), "extra": _integer(allow_null=False)}
+        {"g": varchar(allow_null=False), "extra": integer(allow_null=False)}
     ),
     rows=(("a", 1), ("b", 2)),
 )
@@ -270,7 +258,7 @@ looks the table up.
 
 ARK_JOIN_RIGHT_SPEC = TableSpec(
     name="parity_ark_join_right",
-    schema=Schema({"id": _varchar(allow_null=False), "w": _integer(allow_null=False)}),
+    schema=Schema({"id": varchar(allow_null=False), "w": integer(allow_null=False)}),
     rows=(("i1", 10), ("i2", 20), ("i2", 30), ("i4", 40)),
 )
 """The right side of that join. ``i4`` is on no left row; ``i2`` has two rows.
