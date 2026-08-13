@@ -243,9 +243,7 @@ suite that cares about values.
 
 FEATURES_PUBLIC_SPEC = TableSpec(
     name="parity_features_public",
-    schema=Schema(
-        {"g": varchar(allow_null=False), "extra": integer(allow_null=False)}
-    ),
+    schema=Schema({"g": varchar(allow_null=False), "extra": integer(allow_null=False)}),
     rows=(("a", 1), ("b", 2)),
 )
 """A public table for the ``join_public`` case of the capability matrix.

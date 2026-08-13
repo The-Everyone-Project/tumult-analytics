@@ -25,7 +25,7 @@ from typing import Dict, List, Tuple
 _TABLE_COLUMNS = ("g", "g2", "v", "w")
 """The private table's columns, in the order the table declares them."""
 
-_PROGRAM = f'''
+_PROGRAM = f"""
 import pandas as pd
 import sympy as sp
 from tmlt.core.domains.collections import DictDomain
@@ -67,7 +67,7 @@ keys = KeySet.from_dict({{"g": ["a", "b"], "g2": ["x", "y"]}})
 query = QueryBuilder("t").groupby(keys).count_distinct(columns=["w", "v"], name="c")
 answer = session.evaluate(query, PureDPBudget(float("inf")))
 print(" ".join(answer.columns))
-'''
+"""
 """A whole count-distinct query, as a program a fresh interpreter can run.
 
 It is a string rather than a module so that the seeds under test and the order

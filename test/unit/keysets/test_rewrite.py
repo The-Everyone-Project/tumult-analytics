@@ -9,7 +9,7 @@ to hit known-tricky pieces of the rewriting logic.
 # Copyright Tumult Labs 2025
 
 from inspect import isabstract
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional, Type, cast
 from unittest.mock import patch
 
 import pandas as pd
@@ -22,6 +22,7 @@ from tmlt.analytics.keyset._ops._base import KeySetOp
 from tmlt.analytics.keyset._ops._cross_join import CrossJoin, InMemoryCrossJoin
 from tmlt.analytics.keyset._ops._detect import Detect
 from tmlt.analytics.keyset._ops._filter import Filter
+from tmlt.analytics.keyset._ops._from_tuples import FromTuples
 from tmlt.analytics.keyset._ops._join import Join
 from tmlt.analytics.keyset._ops._project import Project
 from tmlt.analytics.keyset._ops._subtract import Subtract
@@ -241,17 +242,23 @@ def test_rewrite_equality(
 ###############################################################################
 
 
-def _concrete_op_classes() -> list[type]:
+def _concrete_op_classes() -> List[Type[KeySetOp]]:
     """Every concrete KeySetOp class, found by walking the class hierarchy."""
 
-    def descendants(cls: type) -> list[type]:
-        found = []
-        for sub in cls.__subclasses__():
-            found.append(sub)
-            found.extend(descendants(sub))
+    # Typed as plain `type` so that the abstract base can be passed in; the
+    # abstract classes are then filtered out, which is what makes the cast true.
+    def descendants(cls: type) -> List[type]:
+        found: List[type] = []
+        for subclass in cls.__subclasses__():
+            found.append(subclass)
+            found.extend(descendants(subclass))
         return found
 
-    return [cls for cls in descendants(KeySetOp) if not isabstract(cls)]
+    return [
+        cast(Type[KeySetOp], cls)
+        for cls in descendants(KeySetOp)
+        if not isabstract(cls)
+    ]
 
 
 def test_an_operation_with_children_can_rebuild_itself():
@@ -273,11 +280,17 @@ def test_an_operation_with_children_can_rebuild_itself():
     assert missing == []
 
 
-_A = KeySet.from_tuples([(1,), (2,)], columns=["A"])._op_tree
-_B = KeySet.from_tuples([(3,), (4,)], columns=["B"])._op_tree
-_A2 = KeySet.from_tuples([(1,), (5,)], columns=["A"])._op_tree
+def _tuples(rows: List[tuple], columns: List[str]) -> FromTuples:
+    """The FromTuples operation a KeySet of literal rows is built from."""
+    # pylint: disable=protected-access
+    return cast(FromTuples, KeySet.from_tuples(rows, columns=columns)._op_tree)
 
-_OPS = {
+
+_A = _tuples([(1,), (2,)], ["A"])
+_B = _tuples([(3,), (4,)], ["B"])
+_A2 = _tuples([(1,), (5,)], ["A"])
+
+_OPS: Dict[str, KeySetOp] = {
     "from_tuples": _A,
     "detect": Detect(frozenset({"A"})),
     "cross_join": CrossJoin((_A, _B)),
