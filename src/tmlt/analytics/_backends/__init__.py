@@ -36,6 +36,7 @@ from tmlt.analytics._backends._base import (
     NotSupportedByBackend,
     Op,
     Ops,
+    TableDomain,
 )
 from tmlt.analytics._backends._spark import SPARK
 from tmlt.analytics._utils import AnalyticsInternalError
@@ -54,6 +55,7 @@ __all__ = [
     "NotSupportedByBackend",
     "Op",
     "Ops",
+    "TableDomain",
     "backend_for_dataframe",
     "backend_for_domain",
 ]

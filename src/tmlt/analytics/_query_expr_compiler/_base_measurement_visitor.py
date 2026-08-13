@@ -38,7 +38,7 @@ from tmlt.core.transformations.base import Transformation
 from tmlt.core.utils.exact_number import ExactNumber
 
 from tmlt.analytics import AnalyticsInternalError
-from tmlt.analytics._backends import SPARK, Backend
+from tmlt.analytics._backends import SPARK, Backend, TableDomain
 from tmlt.analytics._catalog import Catalog
 from tmlt.analytics._noise_info import NoiseInfo, _noise_from_measurement
 from tmlt.analytics._query_expr import (
@@ -364,7 +364,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def _build_adaptive_groupby_agg_and_noise_info(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         stability: Any,
         mechanism: NoiseMechanism,
@@ -692,7 +692,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def _build_get_keyset_measurement(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         stability: ExactNumber,
         budget: PrivacyBudget,
@@ -784,7 +784,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_count(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         stability: Any,
         mechanism: NoiseMechanism,
@@ -827,7 +827,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -866,7 +868,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_count_distinct_measurement(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         mechanism: NoiseMechanism,
         stability: Any,
@@ -927,7 +929,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
 
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -946,7 +950,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
                 mid_metric,
                 [column for column in mid_domain.schema if column in kept],
             )
-            mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+            mid_domain = self.backend.table_domain(
+                transformation.output_domain, "the selected table's domain"
+            )
             mid_metric = cast(
                 Union[IfGroupedBy, HammingDistance, SymmetricDifference],
                 transformation.output_metric,
@@ -986,7 +992,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_quantile(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         quantile: float,
@@ -1038,7 +1044,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1080,7 +1088,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_bounded_sum(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         lower: ExactNumber,
@@ -1133,7 +1141,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1175,7 +1185,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_bounded_average(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         lower: ExactNumber,
@@ -1228,7 +1238,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1270,7 +1282,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_bounded_variance(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         lower: ExactNumber,
@@ -1323,7 +1335,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1365,7 +1379,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_bounded_stdev(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         lower: ExactNumber,
@@ -1418,7 +1432,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1460,6 +1476,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_bound_selection_measurement(
         self,
+        # Spark-only, and truthfully so: the GetBounds path that calls this
+        # narrows to a SparkDataFrameDomain, because it goes on to require
+        # UnwrapIfGroupedBy, which only the Spark backend has.
         input_domain: SparkDataFrameDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference],
         measure_column: str,

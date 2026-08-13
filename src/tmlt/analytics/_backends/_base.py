@@ -83,6 +83,20 @@ domain type where the code that follows reads something only one backend's
 domain has (``SparkDataFrameDomain.spark_schema``, say -- ``.schema`` is common
 to both families by design)."""
 
+TableDomain = Union[SparkDataFrameDomain, "PandasTableDomain"]
+"""A domain describing a table, in annotations: what a guard leaves behind.
+
+:data:`DATAFRAME_DOMAIN_TYPES` is the same set spelled for ``isinstance``; this
+is the same set spelled for a type checker, and it is what
+:meth:`Backend.table_domain` returns. It says what the compiler actually knows
+about the domains it passes around -- a table of *some* backend -- where the
+annotation used to say ``SparkDataFrameDomain``, which is false on every pandas
+query, or ``Domain``, which is too weak to read ``.schema`` through.
+
+The pandas half is a forward reference so that the alias still evaluates on a
+Core whose pandas domains would not import; see :data:`DATAFRAME_DOMAIN_TYPES`
+for the same reason spelled the other way."""
+
 AnyDataFrame = Union[SparkDataFrame, pd.DataFrame]
 """A table in whichever representation its backend carries tables in.
 
@@ -444,9 +458,7 @@ class Backend:
     :attr:`domain_from_dataframe`.
     """
 
-    def table_domain(
-        self, domain: Domain, context: str
-    ) -> "Union[SparkDataFrameDomain, PandasTableDomain]":
+    def table_domain(self, domain: Domain, context: str) -> TableDomain:
         """Return a domain as this backend's table domain, or say what it is.
 
         The compiler reads ``.schema`` off domains it took from transformations
