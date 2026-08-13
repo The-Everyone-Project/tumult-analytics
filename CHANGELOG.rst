@@ -8,19 +8,12 @@ Changelog
 =========
 
 
-0.21.0+ep.backend.4 (unreleased)
---------------------------------
-
-Changed
-~~~~~~~
-- A grouped :meth:`~tmlt.analytics.QueryBuilder.count_distinct` over a subset of columns names its group columns in the table's order, like every other grouped aggregation. **This changes the column order of the answer** to a query that both groups by two or more columns and passes ``columns`` to ``count_distinct``; nothing else is affected, and the values never were. That path dropped the neither-counted-nor-grouped columns with a ``Select`` built from a ``set``, and Core's ``GroupBy`` takes its group-key order from its input -- so the answer's column order varied with ``PYTHONHASHSEED``, differing between two runs of the same program on the same data.
-
 Unreleased
 ----------
 
 ..
     NOTE (The-Everyone-Project fork): everything in this section is the fork's
-    pandas backend work, and is what the 0.21.0+ep.backend.3 build carries. It is
+    pandas backend work, and is what the 0.21.0+ep.backend.4 build carries. It is
     not an upstream Tumult Analytics release, and is never published to PyPI. The
     heading stays "Unreleased" because renaming it is a step of upstream's release
     machinery, which a fork release does not run; see RELEASING-ep-backend.md.
@@ -48,7 +41,8 @@ Changed
 - Public tables and :meth:`~tmlt.analytics.Session.partition_and_create` remain Spark-only, and are refused rather than accepted on a Session that could not use them. A public table exists to be joined against, and there is no pandas ``join_public`` yet.
 - Nullability of a pandas table is read from its dtypes, which decide it without looking at any value: a column is nullable exactly when its dtype can hold a null. Against a Spark schema inferred from the same frame that is the more precise of the two; against a Spark schema whose string, date or timestamp columns were *declared* non-nullable it is the more permissive, because no pandas dtype for those types can refuse a null.
 - The columns of a grouped aggregation's answer come out in the table's column order, not the :class:`~tmlt.analytics.KeySet`'s. **This changes the column order of the answer** to a query grouped by a KeySet whose columns are in some other order; a KeySet already in the table's order is unaffected, as are the values, which were never wrong. The change is in Core's ``GroupBy`` on both backends at once, so the two stay in step -- see the corresponding entry in ``tmlt.core``'s changelog for why the old order was not merely arbitrary but, on Spark, dependent on ``PYTHONHASHSEED``.
-- Packaging: the version is the static local version ``0.21.0+ep.backend.3``, and ``tmlt.core`` is the Everyone Project build ``0.19.1+ep.backend.2`` -- resolved from a sibling checkout while developing, and from the published wheel by URL everywhere else. See ``RELEASING-ep-backend.md``.
+- A grouped :meth:`~tmlt.analytics.QueryBuilder.count_distinct` over a subset of columns names its group columns in the table's order, like every other grouped aggregation. **This changes the column order of the answer** to a query that both groups by two or more columns and passes ``columns`` to ``count_distinct``; nothing else is affected, and the values never were. That path dropped the neither-counted-nor-grouped columns with a ``Select`` built from a ``set``, and Core's ``GroupBy`` takes its group-key order from its input -- so the answer's column order varied with ``PYTHONHASHSEED``, differing between two runs of the same program on the same data.
+- Packaging: the version is the static local version ``0.21.0+ep.backend.4``, and ``tmlt.core`` is the Everyone Project build ``0.19.1+ep.backend.3`` -- resolved from a sibling checkout while developing, and from the published wheel by URL everywhere else. See ``RELEASING-ep-backend.md``.
 
 Fixed
 ~~~~~
@@ -61,6 +55,7 @@ Fixed
 - :meth:`~tmlt.analytics.QueryBuilder.join_private` is no longer refused by a backend that has the ID-space join but not the ordinary one. The two are separate Core classes and a join uses exactly one of them, chosen by the tables' protected change, so requiring both refused a query the backend could have answered. Neither Analytics backend was affected, since both bind both; the compiler's requirement table is now checked against what the visitors actually build, in both directions, so the class of mistake is caught rather than waited for.
 - The error raised when the installed Core cannot provide the pandas backend says how to get one that can. It named a build that provably does not contain the module it is raised about, and advised a version bound that cannot select a fork build at all, since PEP 440 specifiers ignore local versions.
 - Internal errors raised on code paths that accept either backend's table domain no longer report having expected a ``SparkDataFrameDomain``. On a pandas Session they named a class that could never have appeared there.
+- :meth:`.KeySet.size` counts a frame the KeySet has already built, instead of evaluating its operation tree a second time to produce a number the first evaluation had. On Spark that was a second query plan; on pandas it repeated the whole coercion and deduplication. The path it is reached from is :meth:`~tmlt.analytics.Session.describe`, whose job is to be cheap. A KeySet with no columns -- the total aggregation, which is one group and an empty frame -- still asks the operation tree, since its frame does not have its size in it.
 - :meth:`~tmlt.analytics.Session.evaluate` and the rest of the compilation entry points build the Session's catalog from one walk of its tables rather than four lookups per table, and no longer evaluate the measurement's privacy relation a third time -- Core checks it twice already, both times before any budget is spent. On a Session that has accumulated views, which every :meth:`~tmlt.analytics.Session.create_view` also pays, that is most of the per-query overhead. There is also a private ``Session._evaluate_with_noise_info``, which answers a query and describes its noise from one compilation, so that the two cannot describe different measurements.
 
 .. _v0.21.0:
