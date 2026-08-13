@@ -127,12 +127,12 @@ class Union(KeySetOp):
         )
         return distinct_rows(combined)
 
-    def is_empty(self, backend: Backend = SPARK) -> bool:
+    def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty.
 
         This operation may be expensive.
         """
-        return self.left.is_empty(backend) and self.right.is_empty(backend)
+        return self.left.is_empty() and self.right.is_empty()
 
     def is_plan(self) -> bool:
         """Determine whether this plan has any parts requiring partition selection."""

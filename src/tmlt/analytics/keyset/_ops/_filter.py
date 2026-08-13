@@ -91,12 +91,12 @@ class Filter(KeySetOp):
             unsupported_ops.add(type(self).__name__)
         return unsupported_ops
 
-    def is_empty(self, backend: Backend = SPARK) -> bool:
+    def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty.
 
         This operation may be expensive.
         """
-        return frame_is_empty(self.dataframe(backend))
+        return frame_is_empty(self.dataframe())
 
     def is_plan(self) -> bool:
         """Determine whether this plan has any parts requiring partition selection."""

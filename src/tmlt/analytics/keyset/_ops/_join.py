@@ -114,9 +114,9 @@ class Join(KeySetOp):
             nulls_are_equal=True,
         )
 
-    def is_empty(self, backend: Backend = SPARK) -> bool:
+    def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""
-        return frame_is_empty(self.dataframe(backend))
+        return frame_is_empty(self.dataframe())
 
     def is_plan(self) -> bool:
         """Determine whether this plan has any parts requiring partition selection."""

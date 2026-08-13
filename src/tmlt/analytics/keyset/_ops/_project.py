@@ -98,9 +98,9 @@ class Project(KeySetOp):
         projected = self.child._pandas_dataframe()[list(self.projected_columns)]
         return distinct_rows(projected)
 
-    def is_empty(self, backend: Backend = SPARK) -> bool:
+    def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""
-        return self.child.is_empty(backend)
+        return self.child.is_empty()
 
     def is_plan(self) -> bool:
         """Determine whether this plan has any parts requiring partition selection."""

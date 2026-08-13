@@ -70,7 +70,6 @@ try:
         PandasColumnDescriptor,
         PandasDateColumnDescriptor,
         PandasFloatColumnDescriptor,
-        PandasGroupedTableDomain,
         PandasIntegerColumnDescriptor,
         PandasRowDomain,
         PandasStringColumnDescriptor,
@@ -308,7 +307,6 @@ PANDAS = Backend(
     name="pandas",
     dataframe_domain_type=PandasTableDomain,
     row_domain_type=PandasRowDomain,
-    grouped_domain_type=PandasGroupedTableDomain,
     dataframe_type=pd.DataFrame,
     ops=Ops(
         Rename=Rename,

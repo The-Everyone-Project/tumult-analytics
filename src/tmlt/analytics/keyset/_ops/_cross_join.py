@@ -128,9 +128,9 @@ class CrossJoin(KeySetOp):
 
         return reduce(lambda l, r: l.merge(r, how="cross"), nonempty_dfs)
 
-    def is_empty(self, backend: Backend = SPARK) -> bool:
+    def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""
-        return any(f.is_empty(backend) for f in self.factors)
+        return any(f.is_empty() for f in self.factors)
 
     def is_plan(self) -> bool:
         """Determine whether this plan has any parts requiring partition selection."""

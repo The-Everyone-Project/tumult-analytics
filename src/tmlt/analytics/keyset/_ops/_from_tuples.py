@@ -76,7 +76,7 @@ class FromTuples(KeySetOp):
         """
         return pandas_frame_from_tuples(self.tuples, self.column_descriptors)
 
-    def is_empty(self, backend: Backend = SPARK) -> bool:
+    def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""
         return len(self.column_descriptors) > 0 and len(self.tuples) == 0
 

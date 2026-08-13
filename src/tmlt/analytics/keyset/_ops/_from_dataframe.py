@@ -72,12 +72,8 @@ class FromSparkDataFrame(KeySetOp):
             unsupported_ops.add(type(self).__name__)
         return unsupported_ops
 
-    def is_empty(self, backend: Backend = SPARK) -> bool:
-        """Determine whether the dataframe corresponding to this operation is empty.
-
-        The answer is a property of the Spark dataframe this operation holds, so
-        it is the same whatever backend asks for it.
-        """
+    def is_empty(self) -> bool:
+        """Determine whether the dataframe corresponding to this operation is empty."""
         return self.df.isEmpty()
 
     def is_plan(self) -> bool:

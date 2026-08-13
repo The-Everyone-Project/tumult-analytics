@@ -90,12 +90,12 @@ class Subtract(KeySetOp):
             nulls_are_equal=True,
         )
 
-    def is_empty(self, backend: Backend = SPARK) -> bool:
+    def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty.
 
         This operation may be expensive.
         """
-        return self.left.is_empty(backend) or frame_is_empty(self.dataframe(backend))
+        return self.left.is_empty() or frame_is_empty(self.dataframe())
 
     def is_plan(self) -> bool:
         """Determine whether this plan has any parts requiring partition selection."""

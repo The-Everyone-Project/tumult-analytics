@@ -21,10 +21,9 @@ so that the ``test-nojvm`` nox session can deselect them and run the pandas half
 the file. The marker is written by hand here rather than left to the collection
 hook in ``test/conftest.py``, which infers it from the ``spark`` fixture: these
 tests reach Spark through ``KeySet.dataframe()`` inside the test body, which no
-fixture closure shows. Two of them -- :func:`test_size_matches` and
-:func:`test_is_empty_matches` -- are marked as a whole although a few of their
-corpus cases answer without Spark, because per-case marking would mean marks on a
-corpus that five tests share.
+fixture closure shows. One of them -- :func:`test_size_matches` -- is marked as a
+whole although a few of its corpus cases answer without Spark, because per-case
+marking would mean marks on a corpus that four tests share.
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -206,13 +205,6 @@ def test_size_matches(keyset: KeySet) -> None:
     assert pandas_size == spark_size
     if keyset.columns():
         assert pandas_size == sum(_rows(keyset.to_pandas(), keyset.columns()).values())
-
-
-@parametrize(_corpus())
-@pytest.mark.spark
-def test_is_empty_matches(keyset: KeySet) -> None:
-    """Whether an op-tree is empty is the same answer on either backend."""
-    assert keyset._op_tree.is_empty(PANDAS) == keyset._op_tree.is_empty(SPARK)
 
 
 def test_corpus_covers_every_materializable_op() -> None:

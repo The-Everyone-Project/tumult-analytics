@@ -393,9 +393,6 @@ class Backend:
     row_domain_type: type
     """The domain type describing a single row of a table."""
 
-    grouped_domain_type: type
-    """The domain type describing a grouped table."""
-
     dataframe_type: type
     """The type this backend's tables are carried in."""
 

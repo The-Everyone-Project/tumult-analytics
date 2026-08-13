@@ -144,7 +144,7 @@ class KeySetOp(ABC):
         return unsupported_ops
 
     @abstractmethod
-    def is_empty(self, backend: Backend = SPARK) -> bool:
+    def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""
 
     @abstractmethod

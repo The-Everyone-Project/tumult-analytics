@@ -78,7 +78,7 @@ class Detect(KeySetOp):
             "KeySetPlan does not have a fixed dataframe representation."
         )
 
-    def is_empty(self, backend: Backend = SPARK) -> bool:
+    def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty.
 
         Raises ``AnalyticsInternalError``, as whether the operation's output

@@ -145,7 +145,6 @@ def test_pandas_descriptor_fields():
     assert PANDAS.dataframe_type is pd.DataFrame
     assert PANDAS.dataframe_domain_type is PandasTableDomain
     assert PANDAS.row_domain_type is PandasRowDomain
-    assert PANDAS.grouped_domain_type is PandasGroupedTableDomain
 
 
 def test_pandas_schema_conversions_round_trip():

@@ -31,11 +31,7 @@ from pyspark.sql.types import (
     TimestampType,
 )
 from tmlt.core.domains.base import Domain
-from tmlt.core.domains.spark_domains import (
-    SparkDataFrameDomain,
-    SparkGroupedDataFrameDomain,
-    SparkRowDomain,
-)
+from tmlt.core.domains.spark_domains import SparkDataFrameDomain, SparkRowDomain
 from tmlt.core.measurements.aggregations import (
     create_average_measurement,
     create_bounds_measurement,
@@ -192,7 +188,6 @@ SPARK = Backend(
     name="Spark",
     dataframe_domain_type=SparkDataFrameDomain,
     row_domain_type=SparkRowDomain,
-    grouped_domain_type=SparkGroupedDataFrameDomain,
     dataframe_type=DataFrame,
     ops=Ops(
         Rename=Rename,
