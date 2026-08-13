@@ -17,7 +17,6 @@ import pandas as pd
 import pytest
 from pyspark.sql.types import (
     DoubleType,
-    IntegerType,
     LongType,
     StringType,
     StructField,
@@ -25,7 +24,6 @@ from pyspark.sql.types import (
 )
 
 from tmlt.analytics import AddMaxRows, PureDPBudget
-from tmlt.analytics._backends import SPARK
 from tmlt.analytics._schema import ColumnDescriptor, ColumnType, Schema
 from tmlt.analytics.config import config
 
@@ -380,6 +378,29 @@ def test_the_spark_materialization_reproduces_the_spec(spark, spec: TableSpec):
     assert analytics_columns(spark_frame(spec, spark)) == spec.column_descs()
 
 
+def test_the_spec_restates_the_private_id_data_fixture(
+    _session_data: Dict[str, Any], spark
+):
+    """PRIVATE_ID_DATA describes ``test/conftest.py``'s ``private_id_data`` frame.
+
+    The one deterministic table of that fixture, and the only standard table not
+    covered by
+    :mod:`test.system.backend_parity.test_restatement` -- which sees
+    ``test/system/conftest.py``'s fixture of the same name instead. See that
+    module for why the specs are checked against the fixtures rather than built
+    from them.
+    """
+    fixture = _session_data["private_id_data"]
+    assert list(fixture.columns) == list(PRIVATE_ID_DATA.columns)
+    assert analytics_columns(fixture) == PRIVATE_ID_DATA.column_descs()
+    assert sorted(
+        repr(sorted(row.items())) for row in frame_as_rows(fixture)
+    ) == sorted(
+        repr(sorted(row.items()))
+        for row in frame_as_rows(spark_frame(PRIVATE_ID_DATA, spark))
+    )
+
+
 def test_the_documented_nullability_divergences_are_the_only_ones():
     """Where the backends cannot agree is a fixed, named list.
 
@@ -406,129 +427,6 @@ def test_pandas_dtypes_follow_nullability():
         "x": np.dtype("int64"),
     }
     assert pandas_dtypes_for(ID1.schema)["float_n"] == pd.Float64Dtype()
-
-
-###############################################################################
-# The specs are the frames the existing suite already runs on.
-###############################################################################
-
-
-def _fixture_frames(spark) -> Dict[str, Any]:
-    """Builds the standard frames the way the existing fixtures build them.
-
-    A copy of the constructions in ``test/system/conftest.py`` and (for
-    ``private_id_data``) ``test/conftest.py``, so that the specs can be checked
-    against them. It is a copy rather than a call because those are
-    module-scoped fixtures of another directory, and because the point is to
-    compare against what the suite actually writes.
-
-    Args:
-        spark: The Spark session.
-
-    Returns:
-        The frames, keyed as the fixtures key them.
-    """
-    return {
-        "id1": spark.createDataFrame(
-            pd.DataFrame(
-                [
-                    [1, "A", "X", 4, 4.0],
-                    [1, "A", "Y", 5, 5.0],
-                    [1, "A", "X", 6, 6.0],
-                    [2, "A", "Y", 7, 7.0],
-                    [3, "A", "X", 8, 8.0],
-                    [3, "B", "Y", 9, 9.0],
-                ],
-                columns=["id", "group", "group2", "n", "float_n"],
-            )
-        ),
-        "id2": spark.createDataFrame(
-            pd.DataFrame(
-                [
-                    [1, "A", 12],
-                    [1, "B", 15],
-                    [1, "A", 18],
-                    [2, "B", 21],
-                    [3, "A", 24],
-                    [3, "B", 27],
-                ],
-                columns=["id", "group", "x"],
-            )
-        ),
-        "id3": spark.createDataFrame(
-            [
-                [1, "A", 12],
-                [None, "B", 15],
-                [1, "A", 18],
-                [2, "B", None],
-                [3, "A", 24],
-                [3, "B", 27],
-                [None, "A", 30],
-            ],
-            schema=StructType(
-                [
-                    StructField("id", IntegerType(), nullable=True),
-                    StructField("group", StringType(), nullable=False),
-                    StructField("x", LongType(), nullable=True),
-                ]
-            ),
-        ),
-        "id4": spark.createDataFrame(
-            [
-                [1, "A", 12],
-                [1, "B", 15],
-                [1, "A", 18],
-                [2, "B", 21],
-                [3, "A", 24],
-                [3, "B", 27],
-            ],
-            schema=StructType(
-                [
-                    StructField("id", IntegerType(), nullable=False),
-                    StructField("group", StringType(), nullable=False),
-                    StructField("x", LongType(), nullable=False),
-                ]
-            ),
-        ),
-        "rows1": spark.createDataFrame(
-            [["0", 0, 0], ["0", 0, 1], ["0", 1, 2], ["1", 0, 3]],
-            schema=StructType(
-                [
-                    StructField("A", StringType(), nullable=False),
-                    StructField("B", LongType(), nullable=False),
-                    StructField("X", LongType(), nullable=False),
-                ]
-            ),
-        ),
-        "private_id_data": spark.createDataFrame(
-            pd.DataFrame(
-                [
-                    [1, 4, 100, "X"],
-                    [1, 5, 100, "Y"],
-                    [1, 6, 100, "X"],
-                    [2, 7, 100, "Y"],
-                    [3, 8, 100, "X"],
-                    [3, 9, 100, "Y"],
-                ],
-                columns=["id", "A", "B", "X"],
-            )
-        ),
-    }
-
-
-@pytest.mark.parametrize("spec", SPECS, ids=SPEC_IDS)
-def test_a_spec_restates_the_frame_the_existing_fixtures_build(spark, spec: TableSpec):
-    """Each spec is the table the suite already uses, said differently.
-
-    Compared after Analytics' own Spark coercion, which is what a Session sees:
-    that is where ``id3`` and ``id4``'s ``IntegerType`` ID columns become
-    ``bigint``, which is why the specs declare them as plain ``INTEGER``.
-    """
-    fixture_frame = SPARK.coerce_schema_or_fail(_fixture_frames(spark)[spec.name])
-    assert analytics_columns(fixture_frame) == spec.column_descs()
-    assert_frame_equal_across_backends(
-        fixture_frame, spark_frame(spec, spark), sort_by=[]
-    )
 
 
 ###############################################################################
