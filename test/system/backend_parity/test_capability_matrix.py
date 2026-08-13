@@ -86,6 +86,11 @@ from test.system.backend_parity.tables import (
     build_session,
 )
 
+# The matrix's contents are recorded once, in the unit suite that is about the
+# refusal itself; this module checks the same set rather than a second spelling
+# of it. See PANDAS_UNSUPPORTED_FEATURES there.
+from test.unit.test_unsupported_surface import PANDAS_UNSUPPORTED_FEATURES
+
 _BUDGET = RhoZCDPBudget(100)
 """The budget the matrix's Sessions hold. Finite, so a spend is observable."""
 
@@ -414,26 +419,22 @@ def test_the_two_halves_do_not_overlap():
     assert not overlap, sorted(t.__name__ for t in overlap)
 
 
-def test_the_spark_backend_lacks_nothing():
-    """Spark provides every feature in the table.
-
-    The anchor of every comparison in this module: "unsupported" here always means
-    "unsupported on pandas", and that reading is only correct while this holds.
-    """
-    assert unsupported_features(SPARK) == {}
-
-
 def test_the_pandas_backend_lacks_exactly_these():
-    """The matrix's size, recorded, so that a change to it is deliberate.
+    """The matrix's contents, recorded, so that a change to it is deliberate.
 
-    Sixteen features: fifteen ``QueryExpr`` types, plus automatic partition
-    selection, which is a feature of how a group-by finds its keys rather than a
-    type of its own.
+    Against the same set ``test_unsupported_surface`` checks, rather than
+    against a count of it: two suites recording the same matrix in two
+    spellings is how they come to record different matrices, and a length is
+    the spelling that says least about which features moved.
+
+    That Spark lacks nothing -- the anchor that makes "unsupported" here mean
+    "unsupported on pandas" -- is asserted in that module too.
     """
     unsupported = unsupported_features(PANDAS)
-    assert len(unsupported) == 16
-    assert len(_unsupported_types()) == 15
-    assert "Automatic partition selection" in unsupported
+    assert set(unsupported) == PANDAS_UNSUPPORTED_FEATURES
+    assert {expr_type.__name__ for expr_type in _unsupported_types()} == (
+        PANDAS_UNSUPPORTED_FEATURES - {"Automatic partition selection"}
+    )
     # Every reason names the ops slot that is missing, so a user is told what to
     # change rather than only that something is wrong.
     for feature, reason in unsupported.items():

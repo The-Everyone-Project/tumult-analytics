@@ -513,34 +513,39 @@ def test_the_table_only_names_real_ops():
         assert not unknown, f"{expr_type.__name__} requires unknown ops {unknown}"
 
 
-def test_pandas_is_missing_the_features_it_should_be():
-    """The pandas feature matrix says what phase 1 said it would.
+PANDAS_UNSUPPORTED_FEATURES = {
+    "Filter",
+    "FlatMap",
+    "FlatMapByID",
+    "JoinPublic",
+    "ReplaceNullAndNan",
+    "ReplaceInfinity",
+    "DropNullAndNan",
+    "DropInfinity",
+    "GroupByBoundedSum",
+    "GroupByBoundedAverage",
+    "GroupByBoundedVariance",
+    "GroupByBoundedStdev",
+    "GroupByQuantile",
+    "GetBounds",
+    "GetGroups",
+    "Automatic partition selection",
+} | (set() if _COUNT_FACTORY_BOUND else {"GroupByCount", "GroupByCountDistinct"})
+"""What the pandas backend does not have in phase 1, named rather than counted.
 
-    Spelled out rather than derived, so that a slot bound by accident -- or a
-    table entry loosened -- shows up here as a difference rather than as a
-    silently widened surface.
-    """
-    expected = {
-        "Filter",
-        "FlatMap",
-        "FlatMapByID",
-        "JoinPublic",
-        "ReplaceNullAndNan",
-        "ReplaceInfinity",
-        "DropNullAndNan",
-        "DropInfinity",
-        "GroupByBoundedSum",
-        "GroupByBoundedAverage",
-        "GroupByBoundedVariance",
-        "GroupByBoundedStdev",
-        "GroupByQuantile",
-        "GetBounds",
-        "GetGroups",
-        "Automatic partition selection",
-    }
-    if not _COUNT_FACTORY_BOUND:
-        expected |= {"GroupByCount", "GroupByCountDistinct"}
-    assert set(unsupported_features(PANDAS)) == expected
+Spelled out rather than derived, so that a slot bound by accident -- or a table
+entry loosened -- shows up as a difference rather than as a silently widened
+surface. Fifteen ``QueryExpr`` types plus automatic partition selection, which
+is a feature of how a group-by finds its keys rather than a type of its own.
+
+This is the one statement of the matrix's contents.
+:mod:`test.system.backend_parity.test_capability_matrix` reads it from here, so
+that the parity suite and this one cannot come to expect different matrices."""
+
+
+def test_pandas_is_missing_the_features_it_should_be():
+    """The pandas feature matrix says what phase 1 said it would."""
+    assert set(unsupported_features(PANDAS)) == PANDAS_UNSUPPORTED_FEATURES
 
 
 ###############################################################################

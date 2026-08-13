@@ -57,12 +57,10 @@ NOJVM_TEST_PATHS = [
     # KeySet.dataframe() inside the test body, where the collection hook -- which
     # reads fixture closures -- cannot see it.
     CWD / "test" / "unit" / "keysets" / "test_pandas_materialization.py",
-    # The parity harness's self-tests, and the demonstration a parity suite is
-    # copied from. Core's lane includes its own harness self-tests for the same
+    # The parity harness's self-tests. Core's lane includes its own for the same
     # reason: the harness is what every test above is written against, so a lane
     # that ran them without it would not be checking the same thing.
     CWD / "test" / "unit" / "test_backend_testing.py",
-    CWD / "test" / "unit" / "test_backend_parity_demo.py",
     # The check that the documented feature matrix is the computed one: it reads
     # the same tables the compiler's rejection gate reads, and the docs sources.
     # No data and no engine, so no JVM.
