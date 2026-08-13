@@ -31,7 +31,7 @@ from tmlt.core.transformations.dictionary import (
 from tmlt.core.transformations.identity import Identity as IdentityTransformation
 
 from tmlt.analytics import AnalyticsInternalError
-from tmlt.analytics._backends import DATAFRAME_DOMAIN_TYPES, SPARK, Backend
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._catalog import Catalog
 from tmlt.analytics._query_expr import (
     AnalyticsDefault,
@@ -219,20 +219,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         transformation, reference, constraints = child.accept(self)
         if not isinstance(transformation, Transformation):
             raise AnalyticsInternalError("Child query did not create a transformation.")
-        input_domain = lookup_domain(transformation.output_domain, reference)
+        self.backend.table_domain(
+            lookup_domain(transformation.output_domain, reference),
+            "the child query's output domain",
+        )
         input_metric = lookup_metric(transformation.output_metric, reference)
-        # Two isinstance calls, deliberately. The concrete-types tuple is what
-        # lets mypy narrow the domain for the code below; the backend's own
-        # domain type is the stronger claim -- this visitor compiles for exactly
-        # one backend, so a table domain belonging to the *other* one is a
-        # mix-up, not merely an unrecognized domain.
-        if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES) or not isinstance(
-            input_domain, self.backend.dataframe_domain_type
-        ):
-            raise AnalyticsInternalError(
-                "Child query has an invalid output domain. "
-                f"Unrecognized input domain {type(input_domain)}."
-            )
         if not isinstance(
             input_metric, (IfGroupedBy, SymmetricDifference, HammingDistance)
         ):
@@ -256,15 +247,9 @@ class BaseTransformationVisitor(QueryExprVisitor):
             return self.Output(transformation, reference, constraints)
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            # See _visit_child for why this is checked twice.
-            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES) or not isinstance(
-                input_domain, self.backend.dataframe_domain_type
-            ):
-                raise AnalyticsInternalError(
-                    "Cannot convert this transformation to one with a "
-                    "SymmetricDifference output metric. "
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
+            self.backend.table_domain(
+                input_domain, "the domain being converted to SymmetricDifference"
+            )
             return create_copy_and_transform_value(
                 parent_domain,
                 parent_metric,
@@ -317,12 +302,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = expr.child.accept(self)
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+            input_domain = self.backend.table_domain(
+                lookup_domain(child_transformation.output_domain, child_ref),
+                "the child query's output domain",
+            )
             input_metric = lookup_metric(child_transformation.output_metric, child_ref)
-            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
             if not isinstance(input_metric, (SymmetricDifference, IfGroupedBy)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -369,12 +353,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = expr.child.accept(self)
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+            input_domain = self.backend.table_domain(
+                lookup_domain(child_transformation.output_domain, child_ref),
+                "the child query's output domain",
+            )
             input_metric = lookup_metric(child_transformation.output_metric, child_ref)
-            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
             if not isinstance(input_metric, (IfGroupedBy, SymmetricDifference)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -416,13 +399,12 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = expr.child.accept(self)
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+            input_domain = self.backend.table_domain(
+                lookup_domain(child_transformation.output_domain, child_ref),
+                "the child query's output domain",
+            )
             input_metric = lookup_metric(child_transformation.output_metric, child_ref)
 
-            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
             if not isinstance(
                 input_metric, (IfGroupedBy, SymmetricDifference, HammingDistance)
             ):
@@ -470,11 +452,10 @@ class BaseTransformationVisitor(QueryExprVisitor):
         """Create a transformation from a Map query expression."""
         child_transformation, child_ref, child_constraints = expr.child.accept(self)
 
-        input_domain = lookup_domain(child_transformation.output_domain, child_ref)
-        if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(input_domain)}."
-            )
+        input_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
         transformer_input_domain = self.backend.row_domain_type(input_domain.schema)
         # Any new column created by Map could contain a null value
         new_columns_descriptor = {
@@ -585,11 +566,10 @@ class BaseTransformationVisitor(QueryExprVisitor):
             *expr.child.accept(self)
         )
 
-        input_domain = lookup_domain(child_transformation.output_domain, child_ref)
-        if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(input_domain)}."
-            )
+        input_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
         transformer_input_domain = self.backend.row_domain_type(input_domain.schema)
         # Any new column created by FlatMap could contain a null value
         new_columns_descriptor = {
@@ -694,11 +674,10 @@ class BaseTransformationVisitor(QueryExprVisitor):
             *expr.child.accept(self)
         )
 
-        input_domain = lookup_domain(child_transformation.output_domain, child_ref)
-        if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(input_domain)}."
-            )
+        input_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
         transformer_input_domain = ListDomain(
             self.backend.row_domain_type(input_domain.schema)
         )
@@ -785,16 +764,14 @@ class BaseTransformationVisitor(QueryExprVisitor):
             )
 
         child_transformation = left_transformation | right_transformation
-        left_domain = lookup_domain(child_transformation.output_domain, left_ref)
-        right_domain = lookup_domain(child_transformation.output_domain, right_ref)
-        if not isinstance(left_domain, DATAFRAME_DOMAIN_TYPES):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(left_domain)}."
-            )
-        if not isinstance(right_domain, DATAFRAME_DOMAIN_TYPES):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(right_domain)}."
-            )
+        left_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, left_ref),
+            "the left table's domain",
+        )
+        right_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, right_ref),
+            "the right table's domain",
+        )
 
         # An enum rather than something to construct, so it is read for its
         # members rather than called.
@@ -912,12 +889,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         public_df_schema = Schema(spark_schema_to_analytics_columns(public_df.schema))
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+            input_domain = self.backend.table_domain(
+                lookup_domain(child_transformation.output_domain, child_ref),
+                "the child query's output domain",
+            )
             input_metric = lookup_metric(child_transformation.output_metric, child_ref)
-            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
             if not isinstance(input_metric, (IfGroupedBy, SymmetricDifference)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -954,11 +930,10 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 join_on_nulls=True,
             )
 
-        child_domain = lookup_domain(child_transformation.output_domain, child_ref)
-        if not isinstance(child_domain, DATAFRAME_DOMAIN_TYPES):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(child_domain)}."
-            )
+        child_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
 
         common_cols = set(child_domain.schema) & set(public_df_schema)
         join_cols = set(expr.join_columns or common_cols)
@@ -1032,12 +1007,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = self._visit_child(
             expr.child
         )
-        input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+        input_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
         input_metric = lookup_metric(child_transformation.output_metric, child_ref)
-        if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(input_domain)}."
-            )
         if not isinstance(
             input_metric, (IfGroupedBy, HammingDistance, SymmetricDifference)
         ):
@@ -1089,11 +1063,6 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 input_metric, input_domain
             )
             if replace_null:
-                if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-                    raise AnalyticsInternalError(
-                        f"Expected input domain {type(input_domain)}, got"
-                        f" {type(input_domain)} instead."
-                    )
                 if not isinstance(
                     input_metric, (IfGroupedBy, HammingDistance, SymmetricDifference)
                 ):
@@ -1106,11 +1075,10 @@ class BaseTransformationVisitor(QueryExprVisitor):
                     replace_map=null_replace_map,
                 )
             if replace_nan:
-                if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
-                    raise AnalyticsInternalError(
-                        f"Expected output domain {self.backend.dataframe_domain_type}, got"
-                        f" {type(transformation.output_domain)} instead."
-                    )
+                self.backend.table_domain(
+                    transformation.output_domain,
+                    "the null replacement's output domain",
+                )
                 if not isinstance(
                     transformation.output_metric,
                     (IfGroupedBy, HammingDistance, SymmetricDifference),
@@ -1221,10 +1189,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
             }
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
+            self.backend.table_domain(input_domain, "the child query's output domain")
             if not isinstance(
                 input_metric, (IfGroupedBy, HammingDistance, SymmetricDifference)
             ):
@@ -1292,10 +1257,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                     )
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
+            self.backend.table_domain(input_domain, "the child query's output domain")
             if not isinstance(input_metric, (IfGroupedBy, SymmetricDifference)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -1373,10 +1335,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
         nan_columns = [col for col in columns if analytics_schema[col].allow_nan]
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            if not isinstance(input_domain, DATAFRAME_DOMAIN_TYPES):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
+            self.backend.table_domain(input_domain, "the child query's output domain")
             if not isinstance(input_metric, (IfGroupedBy, SymmetricDifference)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -1391,11 +1350,9 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 )
 
             if nan_columns:
-                if not isinstance(transformation.output_domain, DATAFRAME_DOMAIN_TYPES):
-                    raise AnalyticsInternalError(
-                        f"Expected output domain {self.backend.dataframe_domain_type}, got"
-                        f" {type(transformation.output_domain)} instead."
-                    )
+                self.backend.table_domain(
+                    transformation.output_domain, "the null drop's output domain"
+                )
                 if not isinstance(
                     transformation.output_metric, (IfGroupedBy, SymmetricDifference)
                 ):

@@ -444,6 +444,41 @@ class Backend:
     :attr:`domain_from_dataframe`.
     """
 
+    def table_domain(
+        self, domain: Domain, context: str
+    ) -> "Union[SparkDataFrameDomain, PandasTableDomain]":
+        """Return a domain as this backend's table domain, or say what it is.
+
+        The compiler reads ``.schema`` off domains it took from transformations
+        it built, in a couple of dozen places. Two things have to be true of
+        such a domain, and Core's ``Domain`` annotation expresses neither: that
+        it describes a table at all, and that it belongs to the backend being
+        compiled for -- a domain of the *other* backend would mean a pipeline
+        had been assembled out of both. This asks both questions in one place
+        and returns the narrow union, so that a call site is one line and a type
+        checker sees a table domain afterwards.
+
+        Args:
+            domain: The domain to narrow.
+            context: What the domain is, worded as the message should read it --
+                "the child query's output domain", say. It is the only part of
+                the message that varies, so it is the only thing a call site
+                writes.
+
+        Raises:
+            AnalyticsInternalError: If the domain is not this backend's table
+                domain. On a pipeline this compiler built it always is; if it is
+                not, something upstream is wrong rather than the query.
+        """
+        if not isinstance(domain, DATAFRAME_DOMAIN_TYPES) or not isinstance(
+            domain, self.dataframe_domain_type
+        ):
+            raise AnalyticsInternalError(
+                f"Expected {context} to be a table domain of the {self.name}"
+                f" backend, but it is a {type(domain).__name__}."
+            )
+        return domain
+
     def require(self, op_name: str) -> Op:
         """Return an operation, or say clearly that this backend lacks it.
 

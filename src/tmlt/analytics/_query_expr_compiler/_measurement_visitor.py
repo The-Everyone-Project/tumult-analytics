@@ -13,7 +13,6 @@ from tmlt.core.transformations.base import Transformation
 from tmlt.core.utils.misc import get_nonconflicting_string
 
 from tmlt.analytics import AnalyticsInternalError
-from tmlt.analytics._backends import DATAFRAME_DOMAIN_TYPES
 from tmlt.analytics._noise_info import NoiseInfo, _noise_from_measurement
 from tmlt.analytics._query_expr import GetGroups, QueryExpr
 from tmlt.analytics._query_expr_compiler._base_measurement_visitor import (
@@ -89,20 +88,11 @@ class MeasurementVisitor(BaseMeasurementVisitor):
         )
 
         transformation = get_table_from_ref(child_transformation, child_ref)
-        # Two isinstance calls, deliberately, here and at the two guards below.
-        # The concrete-types tuple is what lets mypy narrow the domain for the
-        # code that follows; the backend's own domain type is the stronger
-        # claim, since this visitor compiles for exactly one backend and a table
-        # domain belonging to the other one would be a mix-up.
-        if not isinstance(
-            transformation.output_domain, DATAFRAME_DOMAIN_TYPES
-        ) or not isinstance(
-            transformation.output_domain, self.backend.dataframe_domain_type
-        ):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(transformation.output_domain)}"
-                " in a GetGroups query."
-            )
+        # The domain is checked again after each step below, because each step
+        # replaces it.
+        self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
 
         # squares the sensitivity in zCDP, which is a worst-case analysis
         # that we may be able to improve.
@@ -110,15 +100,9 @@ class MeasurementVisitor(BaseMeasurementVisitor):
             transformation |= self.backend.require("UnwrapIfGroupedBy")(
                 transformation.output_domain, transformation.output_metric
             )
-        if not isinstance(
-            transformation.output_domain, DATAFRAME_DOMAIN_TYPES
-        ) or not isinstance(
-            transformation.output_domain, self.backend.dataframe_domain_type
-        ):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(transformation.output_domain)}"
-                " in a GetGroups query."
-            )
+        self.backend.table_domain(
+            transformation.output_domain, "the unwrapped table's domain"
+        )
         if not isinstance(
             transformation.output_metric,
             (IfGroupedBy, HammingDistance, SymmetricDifference),
@@ -133,24 +117,16 @@ class MeasurementVisitor(BaseMeasurementVisitor):
         )
 
         mid_stability = transformation.stability_function(self.stability)
-        if not isinstance(
-            transformation.output_domain, DATAFRAME_DOMAIN_TYPES
-        ) or not isinstance(
-            transformation.output_domain, self.backend.dataframe_domain_type
-        ):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(transformation.output_domain)}"
-                " in a GetGroups query."
-            )
+        output_domain = self.backend.table_domain(
+            transformation.output_domain, "the selected table's domain"
+        )
         count_column = "count"
-        if count_column in set(transformation.output_domain.schema):
-            count_column = get_nonconflicting_string(
-                list(transformation.output_domain.schema)
-            )
+        if count_column in set(output_domain.schema):
+            count_column = get_nonconflicting_string(list(output_domain.schema))
 
         epsilon, delta = self.budget.value
         agg = self.backend.require("create_partition_selection_measurement")(
-            input_domain=transformation.output_domain,
+            input_domain=output_domain,
             epsilon=epsilon,
             delta=delta,
             d_in=mid_stability,

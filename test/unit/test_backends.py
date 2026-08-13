@@ -104,6 +104,41 @@ def test_require_explains_a_missing_pandas_op(op: str):
     assert op in str(excinfo.value)
 
 
+_TABLE_SCHEMA = Schema({"A": "VARCHAR", "B": "INTEGER"})
+"""A schema for the table domains the narrowing tests below hand around."""
+
+
+@pytest.mark.parametrize("backend", [SPARK, PANDAS], ids=["spark", "pandas"])
+def test_table_domain_returns_its_own_table_domain(backend: Backend):
+    """A backend's own table domain comes back unchanged."""
+    domain = backend.dataframe_domain(_TABLE_SCHEMA)
+    assert backend.table_domain(domain, "the table's domain") is domain
+
+
+@pytest.mark.parametrize(
+    "backend,other", [(SPARK, PANDAS), (PANDAS, SPARK)], ids=["spark", "pandas"]
+)
+def test_table_domain_rejects_the_other_backend(backend: Backend, other: Backend):
+    """A table domain of the *other* backend is a mix-up, not a table domain.
+
+    This is the half of the check that a plain "is it a table domain at all"
+    guard misses: both arguments here describe a table, so only the comparison
+    against the compiling backend's own domain type can tell them apart.
+    """
+    with pytest.raises(AnalyticsInternalError) as excinfo:
+        backend.table_domain(other.dataframe_domain(_TABLE_SCHEMA), "the input domain")
+    assert "the input domain" in str(excinfo.value)
+    assert backend.name in str(excinfo.value)
+
+
+@pytest.mark.parametrize("backend", [SPARK, PANDAS], ids=["spark", "pandas"])
+def test_table_domain_rejects_a_domain_that_is_not_a_table(backend: Backend):
+    """A domain that describes something other than a table is refused."""
+    with pytest.raises(AnalyticsInternalError) as excinfo:
+        backend.table_domain(NumpyIntegerDomain(), "the input domain")
+    assert "NumpyIntegerDomain" in str(excinfo.value)
+
+
 def test_pandas_descriptor_fields():
     """The pandas backend describes pandas tables."""
     assert PANDAS.name == "pandas"
