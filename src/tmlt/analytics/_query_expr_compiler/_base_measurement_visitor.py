@@ -933,13 +933,18 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             transformation.output_metric,
         )
         # If not counting all columns, drop the ones that are neither counted
-        # nor grouped on.
+        # nor grouped on. Keep them in the input domain's order rather than the
+        # order the union of the two column lists happens to come out in: Core's
+        # GroupBy reads its group-key order off its input domain, which on this
+        # path is this Select's output, so any other order here would leak into
+        # the answer's columns -- and a set's order varies with PYTHONHASHSEED.
         if expr.columns_to_count:
             groupby_columns = list(expr.groupby_keys.schema().keys())  # type: ignore
+            kept = set(expr.columns_to_count) | set(groupby_columns)
             transformation |= self.backend.require("Select")(
                 mid_domain,
                 mid_metric,
-                list(set(list(expr.columns_to_count) + groupby_columns)),
+                [column for column in mid_domain.schema if column in kept],
             )
             mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
             mid_metric = cast(

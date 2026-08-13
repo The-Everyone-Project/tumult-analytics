@@ -48,6 +48,9 @@ NOJVM_TEST_PATHS = [
     CWD / "test" / "unit" / "test_session_pandas.py",
     CWD / "test" / "unit" / "test_coerce_pandas_schema.py",
     CWD / "test" / "unit" / "test_pandas_schema_conversion.py",
+    # The hash-seed check on the answer's column order. It answers on pandas, in
+    # subprocesses of its own, and neither they nor the parent reach for a JVM.
+    CWD / "test" / "unit" / "test_answer_column_order.py",
     # KeySet materialization. Half of this file compares the pandas frame against
     # the Spark one, and half asks only about the pandas frame. The comparisons
     # carry the `spark` marker written by hand: they reach Spark through

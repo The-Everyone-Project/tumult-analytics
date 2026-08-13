@@ -8,6 +8,13 @@ Changelog
 =========
 
 
+0.21.0+ep.backend.4 (unreleased)
+--------------------------------
+
+Changed
+~~~~~~~
+- A grouped :meth:`~tmlt.analytics.QueryBuilder.count_distinct` over a subset of columns names its group columns in the table's order, like every other grouped aggregation. **This changes the column order of the answer** to a query that both groups by two or more columns and passes ``columns`` to ``count_distinct``; nothing else is affected, and the values never were. That path dropped the neither-counted-nor-grouped columns with a ``Select`` built from a ``set``, and Core's ``GroupBy`` takes its group-key order from its input -- so the answer's column order varied with ``PYTHONHASHSEED``, differing between two runs of the same program on the same data.
+
 Unreleased
 ----------
 
