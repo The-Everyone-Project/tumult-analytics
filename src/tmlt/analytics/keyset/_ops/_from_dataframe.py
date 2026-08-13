@@ -4,7 +4,7 @@
 # Copyright Tumult Labs 2025
 
 from dataclasses import dataclass
-from typing import Any, Literal, NoReturn, Optional, overload
+from typing import Any, Literal, Optional, overload
 
 from pyspark.sql import DataFrame
 
@@ -13,7 +13,7 @@ from tmlt.analytics._coerce_spark_schema import coerce_spark_schema_or_fail
 from tmlt.analytics._schema import ColumnDescriptor, spark_schema_to_analytics_columns
 
 from ._base import KeySetOp
-from ._frames import FrameKind, frame_kind, unsupported
+from ._frames import frame_kind
 from ._utils import validate_schema
 
 
@@ -22,6 +22,16 @@ class FromSparkDataFrame(KeySetOp):
     """Construct a KeySet from a Spark DataFrame."""
 
     df: DataFrame
+
+    _no_pandas_hint = (
+        "Collecting a Spark dataframe into memory is the caller's decision to"
+        " make; build the KeySet with KeySet.from_tuples instead."
+    )
+    """A KeySet built from a Spark dataframe can only be materialized as one.
+    Collecting a distributed frame into the driver's memory is not something to
+    do because a backend was switched: it is unbounded work on data whose size
+    nobody has looked at, and if it is the right thing to do it is the caller's
+    to decide."""
 
     def __post_init__(self):
         """Validation."""
@@ -44,33 +54,6 @@ class FromSparkDataFrame(KeySetOp):
         dataframe is not evaluated until it is used elsewhere.
         """
         return coerce_spark_schema_or_fail(self.df.dropDuplicates())
-
-    def _pandas_dataframe(self) -> NoReturn:
-        """Raises: a Spark dataframe is not collected into memory implicitly.
-
-        See :meth:`unsupported_ops`.
-        """
-        raise unsupported(
-            self,
-            FrameKind.PANDAS,
-            "Collecting a Spark dataframe into memory is the caller's decision"
-            " to make; build the KeySet with KeySet.from_tuples instead.",
-        )
-
-    def unsupported_frame_ops(self, kind: FrameKind) -> set[str]:
-        """The operations in this op-tree that cannot produce a frame of this kind.
-
-        A KeySet built from a Spark dataframe can only be materialized as one.
-        Collecting a distributed frame into the driver's memory is not something
-        to do because a backend was switched: it is unbounded work on data whose
-        size nobody has looked at, and if it is the right thing to do it is the
-        caller's to decide. Build the KeySet with
-        :meth:`~tmlt.analytics.KeySet.from_tuples` instead.
-        """
-        unsupported_ops = super().unsupported_frame_ops(kind)
-        if kind is FrameKind.PANDAS:
-            unsupported_ops.add(type(self).__name__)
-        return unsupported_ops
 
     def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""

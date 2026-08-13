@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Collection, Literal, Optional, overload
+from typing import ClassVar, Collection, Literal, Optional, overload
 
 import pandas as pd
 from pyspark.sql import DataFrame
@@ -20,6 +20,19 @@ from ._frames import FrameKind, KeySetFrame, frame_kind, unsupported
 
 class KeySetOp(ABC):
     """Base class for operations used to define KeySets."""
+
+    _no_pandas_hint: ClassVar[Optional[str]] = None
+    """Why this operation cannot be materialized in memory, if it cannot.
+
+    An operation with no pandas path has to say so twice -- once when asked for
+    a frame, and once when :meth:`unsupported_frame_ops` walks the tree looking
+    for exactly such operations before evaluating any of it. The two answers
+    have to agree, and nothing but this attribute makes them: setting it is the
+    whole of declaring that an operation is Spark-only, and the default of None
+    is the whole of declaring that it is not.
+
+    The value is the hint the error carries, so it should say what to do
+    instead rather than only what went wrong."""
 
     @abstractmethod
     def columns(self) -> set[str]:
@@ -109,10 +122,11 @@ class KeySetOp(ABC):
         """Generate the pandas dataframe corresponding to this operation.
 
         Operations that have no pandas implementation inherit this, which says
-        so; :meth:`unsupported_ops` reports the same operations without
-        evaluating anything.
+        so, with the reason from :attr:`_no_pandas_hint`;
+        :meth:`unsupported_ops` reports the same operations from the same
+        attribute, without evaluating anything.
         """
-        raise unsupported(self, FrameKind.PANDAS)
+        raise unsupported(self, FrameKind.PANDAS, self._no_pandas_hint)
 
     def unsupported_ops(self, backend: Backend) -> set[str]:
         """The names of the operations in this op-tree the backend cannot perform.
@@ -139,6 +153,8 @@ class KeySetOp(ABC):
             kind: The kind of frame the tree would be materialized as.
         """
         unsupported_ops: set[str] = set()
+        if kind is FrameKind.PANDAS and self._no_pandas_hint is not None:
+            unsupported_ops.add(type(self).__name__)
         for child in self.children():
             unsupported_ops |= child.unsupported_frame_ops(kind)
         return unsupported_ops

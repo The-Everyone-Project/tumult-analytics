@@ -5,7 +5,7 @@
 
 import textwrap
 from dataclasses import dataclass, replace
-from typing import Literal, NoReturn, Optional, Union, overload
+from typing import Literal, Optional, Union, overload
 
 from pyspark.sql import Column, DataFrame
 
@@ -14,13 +14,7 @@ from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._schema import ColumnDescriptor
 
 from ._base import KeySetOp
-from ._frames import (
-    FrameKind,
-    frame_count,
-    frame_is_empty,
-    frame_kind,
-    unsupported,
-)
+from ._frames import frame_count, frame_is_empty, frame_kind
 
 
 @dataclass(frozen=True)
@@ -29,6 +23,15 @@ class Filter(KeySetOp):
 
     child: KeySetOp
     condition: Union[Column, str]
+
+    _no_pandas_hint = (
+        "A KeySet filter condition is a Spark SQL expression; build the"
+        " filtered KeySet with KeySet.from_tuples instead."
+    )
+    """A filter condition is a Spark SQL expression or a
+    :class:`~pyspark.sql.Column`, and evaluating one means asking Spark. It is a
+    piece of Spark the user wrote, not a piece Analytics chose, so there is
+    nothing to translate it into."""
 
     def __post_init__(self):
         """Validation."""
@@ -65,31 +68,6 @@ class Filter(KeySetOp):
         dataframe is not evaluated until it is used elsewhere.
         """
         return self.child._spark_dataframe().filter(self.condition)
-
-    def _pandas_dataframe(self) -> NoReturn:
-        """Raises: a filter condition can only be evaluated by Spark.
-
-        See :meth:`unsupported_ops`.
-        """
-        raise unsupported(
-            self,
-            FrameKind.PANDAS,
-            "A KeySet filter condition is a Spark SQL expression; build the"
-            " filtered KeySet with KeySet.from_tuples instead.",
-        )
-
-    def unsupported_frame_ops(self, kind: FrameKind) -> set[str]:
-        """The operations in this op-tree that cannot produce a frame of this kind.
-
-        A filter condition is a Spark SQL expression or a
-        :class:`~pyspark.sql.Column`, and evaluating one means asking Spark. It
-        is a piece of Spark the user wrote, not a piece Analytics chose, so
-        there is nothing to translate it into.
-        """
-        unsupported_ops = super().unsupported_frame_ops(kind)
-        if kind is FrameKind.PANDAS:
-            unsupported_ops.add(type(self).__name__)
-        return unsupported_ops
 
     def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty.
