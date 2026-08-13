@@ -4,7 +4,7 @@
 # Copyright Tumult Labs 2025
 
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, NoReturn, Optional, Union, overload
 
 from pyspark.sql import Column, DataFrame
@@ -52,6 +52,11 @@ class Filter(KeySetOp):
     def children(self) -> tuple[KeySetOp, ...]:
         """The operations whose outputs this one is computed from."""
         return (self.child,)
+
+    def with_children(self, children: tuple[KeySetOp, ...]) -> KeySetOp:
+        """This filter over the given child operation."""
+        (child,) = children
+        return replace(self, child=child)
 
     def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.

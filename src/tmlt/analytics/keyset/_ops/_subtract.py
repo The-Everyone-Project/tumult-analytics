@@ -4,7 +4,7 @@
 # Copyright Tumult Labs 2025
 
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Collection, Literal, Optional, overload
 
 import pandas as pd
@@ -55,6 +55,11 @@ class Subtract(KeySetOp):
     def children(self) -> tuple[KeySetOp, ...]:
         """The operations whose outputs this one is computed from."""
         return (self.left, self.right)
+
+    def with_children(self, children: tuple[KeySetOp, ...]) -> KeySetOp:
+        """This subtraction over the given left and right operations."""
+        left, right = children
+        return replace(self, left=left, right=right)
 
     def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.

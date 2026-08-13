@@ -8,7 +8,7 @@ from __future__ import annotations
 import itertools
 import operator
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import reduce
 from typing import Collection, Iterator, Literal, Mapping, Optional, overload
 
@@ -64,6 +64,10 @@ class CrossJoin(KeySetOp):
     def children(self) -> tuple[KeySetOp, ...]:
         """The operations whose outputs this one is computed from."""
         return self.factors
+
+    def with_children(self, children: tuple[KeySetOp, ...]) -> KeySetOp:
+        """This cross-join over the given factors."""
+        return replace(self, factors=tuple(children))
 
     def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.

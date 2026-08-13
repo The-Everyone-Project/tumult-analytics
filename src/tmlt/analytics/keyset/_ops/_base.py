@@ -13,6 +13,7 @@ from pyspark.sql import DataFrame
 
 from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._schema import ColumnDescriptor
+from tmlt.analytics._utils import AnalyticsInternalError
 
 from ._frames import FrameKind, KeySetFrame, frame_kind, unsupported
 
@@ -43,6 +44,31 @@ class KeySetOp(ABC):
         Empty for the operations that introduce data rather than transform it.
         """
         return ()
+
+    def with_children(self, children: tuple[KeySetOp, ...]) -> KeySetOp:
+        """This operation over the given children in place of its own.
+
+        The companion of :meth:`children`, and its inverse:
+        ``op.with_children(op.children())`` equals ``op``. Together the two are
+        everything a tree walk needs -- take an operation apart, rewrite the
+        pieces, put it back together -- which is how the rewrite rules in
+        :mod:`~tmlt.analytics.keyset._ops._rules` walk a tree without knowing
+        what any node in it is. An operation that overrides both is walked
+        correctly without anything else being told it exists.
+
+        The default is the one the operations that introduce data want: they
+        have no children, so there is nothing to replace.
+
+        Args:
+            children: The replacements: as many as :meth:`children` returns, in
+                the same order.
+        """
+        if children:
+            raise AnalyticsInternalError(
+                f"{type(self).__qualname__} has no children, but"
+                f" {len(children)} were passed to with_children."
+            )
+        return self
 
     def dataframe(self, backend: Backend = SPARK) -> KeySetFrame:
         """Generate the dataframe corresponding to this operation.
