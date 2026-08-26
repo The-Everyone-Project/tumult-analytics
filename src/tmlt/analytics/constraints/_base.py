@@ -8,6 +8,7 @@ from typing import Tuple
 
 from tmlt.core.transformations.base import Transformation
 
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._table_reference import TableReference
 
 
@@ -26,6 +27,21 @@ class Constraint(ABC):
 
     @abstractmethod
     def _enforce(
-        self, child_transformation: Transformation, child_ref: TableReference
+        self,
+        child_transformation: Transformation,
+        child_ref: TableReference,
+        *,
+        backend: Backend = SPARK,
     ) -> Tuple[Transformation, TableReference]:
+        """Append this constraint's truncation to a transformation.
+
+        Args:
+            child_transformation: The transformation whose output to truncate.
+            child_ref: Which of its tables to truncate.
+            backend: The backend to build the truncation with. A constraint is a
+                value a user constructs, with no backend in it, so the backend
+                comes from whoever enforces it -- the visitor compiling the
+                query, or the Session partitioning a table -- each of which
+                already knows which one it is on.
+        """
         raise NotImplementedError()

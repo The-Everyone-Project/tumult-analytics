@@ -53,12 +53,21 @@ class PrivateTable(Table):
 
 
 class Catalog:
-    """Specifies schemas and constraints on public and private tables."""
+    """Specifies schemas and constraints on public and private tables.
+
+    A catalog says what tables there are and what is in them; it says nothing
+    about which backend holds them. That is the compiler's own property, and
+    :meth:`~tmlt.analytics._query_expr_compiler.QueryExprCompiler.query_schema`
+    reads it from there. Recording it here as well would only give the answer
+    somewhere to disagree with itself -- and it did: a catalog built without
+    naming a backend said Spark, so a pandas compiler handed one validated its
+    queries against Spark's feature set.
+    """
 
     def __init__(self):
         """Constructor."""
-        self._private_tables = {}
-        self._public_tables = {}
+        self._private_tables: Dict[str, PrivateTable] = {}
+        self._public_tables: Dict[str, PublicTable] = {}
 
     def add_private_table(
         self,

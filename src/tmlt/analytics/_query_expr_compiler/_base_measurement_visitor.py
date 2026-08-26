@@ -5,40 +5,20 @@
 import math
 import warnings
 from abc import abstractmethod
-from datetime import datetime
-from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import sympy as sp
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.types import (
-    BooleanType,
-    ByteType,
-    DateType,
-    DecimalType,
-    DoubleType,
-    FloatType,
-    IntegerType,
-    LongType,
-    ShortType,
-    StringType,
-    StructType,
-    TimestampType,
-)
+from pyspark.sql import DataFrame
+from tmlt.core.domains.base import Domain
 from tmlt.core.domains.collections import DictDomain
+
+# SparkDataFrameDomain stays a direct import here, unlike in the transformation
+# visitor: the paths below that name it reach operations no other backend has
+# yet -- UnwrapIfGroupedBy in the GetBounds and GetGroups paths, and the Spark
+# DataFrame the KeySet suppression function takes. Those annotations and the
+# guards feeding them are marked spark-only, and move with the KeySet work.
 from tmlt.core.domains.spark_domains import SparkDataFrameDomain
-from tmlt.core.measurements.aggregations import (
-    NoiseMechanism,
-    create_average_measurement,
-    create_bounds_measurement,
-    create_count_distinct_measurement,
-    create_count_measurement,
-    create_partition_selection_measurement,
-    create_quantile_measurement,
-    create_standard_deviation_measurement,
-    create_sum_measurement,
-    create_variance_measurement,
-)
+from tmlt.core.measurements.aggregations import NoiseMechanism
 from tmlt.core.measurements.base import Measurement
 from tmlt.core.measurements.interactive_measurements import (
     MeasurementQuery,
@@ -55,14 +35,10 @@ from tmlt.core.metrics import (
     SymmetricDifference,
 )
 from tmlt.core.transformations.base import Transformation
-from tmlt.core.transformations.converters import UnwrapIfGroupedBy
-from tmlt.core.transformations.spark_transformations.groupby import GroupBy
-from tmlt.core.transformations.spark_transformations.select import (
-    Select as SelectTransformation,
-)
 from tmlt.core.utils.exact_number import ExactNumber
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import SPARK, Backend, TableDomain
 from tmlt.analytics._catalog import Catalog
 from tmlt.analytics._noise_info import NoiseInfo, _noise_from_measurement
 from tmlt.analytics._query_expr import (
@@ -240,7 +216,7 @@ def _generate_constrained_count_distinct(
     """
     columns_to_count = set(query.columns_to_count or schema.columns)
     if isinstance(query.groupby_keys, KeySet):
-        groupby_columns = query.groupby_keys.dataframe().columns
+        groupby_columns = query.groupby_keys.columns()
     else:
         groupby_columns = list(query.groupby_keys)
 
@@ -300,46 +276,6 @@ def _generate_constrained_count_distinct(
     return None
 
 
-def _build_keyset_for_spark_schema(schema: StructType) -> KeySet:
-    """Create a single-row DataFrame with the given schema."""
-    spark = SparkSession.builder.getOrCreate()
-
-    # KeySets with no columns aren't allowed to have rows.
-    if not schema.fields:
-        return KeySet.from_dataframe(spark.createDataFrame([], schema=schema))
-
-    default_values = []
-    for field in schema.fields:
-        default_value: Any
-        if isinstance(field.dataType, (ByteType, ShortType, IntegerType, LongType)):
-            default_value = 0
-        elif isinstance(field.dataType, (FloatType, DoubleType)):
-            default_value = 0.0
-        elif isinstance(field.dataType, StringType):
-            default_value = ""
-        elif isinstance(field.dataType, BooleanType):
-            default_value = False
-        elif isinstance(field.dataType, DateType):
-            default_value = datetime.strptime("1970-01-01", "%Y-%m-%d").date()
-        elif isinstance(field.dataType, TimestampType):
-            default_value = datetime.strptime(
-                "1970-01-01 00:00:00", "%Y-%m-%d %H:%M:%S"
-            )
-        elif isinstance(field.dataType, DecimalType):
-            default_value = Decimal("0.0")
-        else:
-            raise ValueError(f"Unsupported data type {field.dataType}")
-        default_values.append(default_value)
-
-    # Create a DataFrame with a single row using the default values
-    df = spark.createDataFrame([tuple(default_values)], schema=schema)
-    if df.schema != schema:
-        raise AnalyticsInternalError(
-            f"Failed to create a DataFrame with schema {schema}."
-        )
-    return KeySet.from_dataframe(df)
-
-
 def _split_auto_partition_budget(
     budget: PrivacyBudget,
 ) -> Tuple[ApproxDPBudget, ApproxDPBudget]:
@@ -376,6 +312,8 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         output_measure: Union[PureDP, ApproxDP, RhoZCDP],
         default_mechanism: NoiseMechanism,
         catalog: Catalog,
+        *,
+        backend: Backend = SPARK,
     ):
         """Constructor for MeasurementVisitor."""
         self.budget = privacy_budget
@@ -386,6 +324,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         self.default_mechanism = default_mechanism
         self.output_measure = output_measure
         self.catalog = catalog
+        self.backend = backend
 
     def _get_zero_budget(self) -> PrivacyBudget:
         """Return a budget with zero epsilon and zero delta."""
@@ -397,13 +336,13 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             return RhoZCDPBudget(0)
         raise AnalyticsInternalError(f"Unknown budget type {type(self.budget)}.")
 
-    @staticmethod
     def _build_groupby(
-        input_domain: SparkDataFrameDomain,
+        self,
+        input_domain: Domain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         mechanism: NoiseMechanism,
         keyset: KeySet,
-    ) -> GroupBy:
+    ) -> Transformation:
         """Build a groupby transformation."""
         # TODO(#1044 and #1547): Update condition to when issue is resolved.
         # isinstance(self._output_measure, RhoZCDP)
@@ -411,22 +350,27 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             NoiseMechanism.DISCRETE_GAUSSIAN,
             NoiseMechanism.GAUSSIAN,
         )
-        return GroupBy(
+        return self.backend.require("GroupBy")(
             input_domain=input_domain,
             input_metric=input_metric,
             use_l2=use_l2,
-            group_keys=keyset.dataframe(),
+            # The group keys are a frame of the backend's own kind: the pandas
+            # GroupBy takes a pandas frame and rejects a Spark one. The keys
+            # themselves are the same either way -- which frame a KeySet
+            # materializes as is asked of the KeySet rather than of the ops
+            # table, as the note at the end of Ops explains.
+            group_keys=keyset.dataframe(self.backend),
         )
 
     def _build_adaptive_groupby_agg_and_noise_info(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         stability: Any,
         mechanism: NoiseMechanism,
         columns: Tuple[str, ...],
         keyset: Union[KeySet, Tuple[str, ...]],
-        build_groupby_agg_from_groupby: Callable[[GroupBy], Measurement],
+        build_groupby_agg_from_groupby: Callable[[Transformation], Measurement],
         keyset_budget: PrivacyBudget,
     ) -> Tuple[Measurement, NoiseInfo]:
         """Builds a measurement which gets a keyset and performs a groupby aggregation.
@@ -451,10 +395,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         if keyset is None:
             raise AnalyticsInternalError("No keyset provided.")
         if isinstance(keyset, KeySet):
-            if tuple(keyset.dataframe().columns) != columns:
+            if tuple(keyset.columns()) != columns:
                 raise AnalyticsInternalError(
-                    f"Keyset columns {keyset.dataframe().columns} do not match "
-                    f"columns {columns}."
+                    f"Keyset columns {keyset.columns()} do not match columns {columns}."
                 )
 
         def perform_groupby_agg(
@@ -492,14 +435,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         # groupby_agg measurement without being adaptive.
         # The key assumption is that a keyset with 1 arbitrary row will have the same
         # privacy analysis as the adaptively selected keyset.
-        groupby_schema = StructType(
-            [
-                struct_field
-                for struct_field in input_domain.spark_schema
-                if struct_field.name in columns
-            ]
-        )
-        sample_keyset = _build_keyset_for_spark_schema(groupby_schema)
+        sample_keyset = self.backend.sample_keyset(input_domain, columns)
         groupby_sample_keyset = self._build_groupby(
             input_domain, input_metric, mechanism, sample_keyset
         )
@@ -756,7 +692,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def _build_get_keyset_measurement(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         stability: ExactNumber,
         budget: PrivacyBudget,
@@ -787,13 +723,15 @@ class BaseMeasurementVisitor(QueryExprVisitor):
                     "epsilon and delta greater than 0. The budget provided was "
                     f"{budget}."
                 )
-            select = SelectTransformation(input_domain, input_metric, columns)
-            keyset_domain = SparkDataFrameDomain(
+            select = self.backend.require("Select")(input_domain, input_metric, columns)
+            keyset_domain = self.backend.dataframe_domain_type(
                 schema={col: input_domain[col] for col in columns}
             )
 
             epsilon, delta = budget.value
-            keyset_measurement = select | create_partition_selection_measurement(
+            keyset_measurement = select | self.backend.require(
+                "create_partition_selection_measurement"
+            )(
                 input_domain=keyset_domain,
                 d_in=stability,
                 epsilon=epsilon,
@@ -814,8 +752,6 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             return PostProcess(keyset_measurement, process_function)
 
         else:
-            columns = keyset_or_columns.dataframe().columns
-
             if isinstance(budget, PureDPBudget):
                 if budget.epsilon != 0:
                     raise AnalyticsInternalError(
@@ -836,7 +772,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
                     )
             else:
                 raise AssertionError(f"Unrecognized budget type {type(budget)}")
-            keyset_measurement = lambda _: keyset_or_columns  # type: ignore
+            keyset_measurement = lambda _: keyset_or_columns
             no_op = SequentialComposition(
                 input_domain=input_domain,
                 input_metric=input_metric,
@@ -848,16 +784,16 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_count(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         stability: Any,
         mechanism: NoiseMechanism,
         budget: PrivacyBudget,
-        groupby: GroupBy,
+        groupby: Transformation,
         output_column: str,
     ) -> Measurement:
         """Build a Measurement for a GroupByCount query."""
-        return create_count_measurement(
+        return self.backend.require("create_count_measurement")(
             input_domain=input_domain,
             input_metric=input_metric,
             noise_mechanism=mechanism,
@@ -876,7 +812,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -891,7 +827,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -899,7 +837,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         mid_stability = transformation.stability_function(self.stability)
 
         def _build_groupby_agg_from_groupby(
-            groupby: GroupBy,
+            groupby: Transformation,
         ) -> Measurement:
             """Build a Measurement for a GroupByCount query."""
             return self.build_groupby_count(
@@ -930,16 +868,16 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_count_distinct_measurement(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         mechanism: NoiseMechanism,
         stability: Any,
         budget: PrivacyBudget,
-        groupby: GroupBy,
+        groupby: Transformation,
         output_column: str,
     ) -> Measurement:
         """Build a Measurement for a GroupByCountDistinct query."""
-        return create_count_distinct_measurement(
+        return self.backend.require("create_count_distinct_measurement")(
             input_domain=input_domain,
             input_metric=input_metric,
             noise_mechanism=mechanism,
@@ -960,7 +898,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -991,21 +929,30 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
 
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
         )
         # If not counting all columns, drop the ones that are neither counted
-        # nor grouped on.
+        # nor grouped on. Keep them in the input domain's order rather than the
+        # order the union of the two column lists happens to come out in: Core's
+        # GroupBy reads its group-key order off its input domain, which on this
+        # path is this Select's output, so any other order here would leak into
+        # the answer's columns -- and a set's order varies with PYTHONHASHSEED.
         if expr.columns_to_count:
             groupby_columns = list(expr.groupby_keys.schema().keys())  # type: ignore
-            transformation |= SelectTransformation(
+            kept = set(expr.columns_to_count) | set(groupby_columns)
+            transformation |= self.backend.require("Select")(
                 mid_domain,
                 mid_metric,
-                list(set(list(expr.columns_to_count) + groupby_columns)),
+                [column for column in mid_domain.schema if column in kept],
             )
-            mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+            mid_domain = self.backend.table_domain(
+                transformation.output_domain, "the selected table's domain"
+            )
             mid_metric = cast(
                 Union[IfGroupedBy, HammingDistance, SymmetricDifference],
                 transformation.output_metric,
@@ -1014,7 +961,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         mid_stability = transformation.stability_function(self.stability)
 
         def _build_groupby_agg_from_groupby(
-            groupby: GroupBy,
+            groupby: Transformation,
         ) -> Measurement:
             """Build a Measurement for a GroupByCountDistinct query."""
             return self.build_count_distinct_measurement(
@@ -1045,7 +992,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_quantile(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         quantile: float,
@@ -1053,11 +1000,11 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         upper: Union[int, float],
         stability: Any,
         budget: PrivacyBudget,
-        groupby: GroupBy,
+        groupby: Transformation,
         output_column: str,
     ) -> Measurement:
         """Build a Measurement for a GroupByQuantile query."""
-        return create_quantile_measurement(
+        return self.backend.require("create_quantile_measurement")(
             input_domain=input_domain,
             input_metric=input_metric,
             measure_column=measure_column,
@@ -1081,7 +1028,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1097,7 +1044,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1105,7 +1054,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         mid_stability = transformation.stability_function(self.stability)
 
         def _build_groupby_agg_from_groupby(
-            groupby: GroupBy,
+            groupby: Transformation,
         ) -> Measurement:
             """Build a Measurement for a GroupByQuantile query."""
             return self.build_groupby_quantile(
@@ -1139,7 +1088,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_bounded_sum(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         lower: ExactNumber,
@@ -1147,11 +1096,11 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         stability: Any,
         mechanism: NoiseMechanism,
         budget: PrivacyBudget,
-        groupby: GroupBy,
+        groupby: Transformation,
         output_column: str,
     ) -> Measurement:
         """Build a Measurement for a GroupByBoundedSum query."""
-        return create_sum_measurement(
+        return self.backend.require("create_sum_measurement")(
             input_domain=input_domain,
             input_metric=input_metric,
             measure_column=measure_column,
@@ -1175,7 +1124,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1192,7 +1141,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1200,7 +1151,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         mid_stability = transformation.stability_function(self.stability)
 
         def _build_groupby_agg_from_groupby(
-            groupby: GroupBy,
+            groupby: Transformation,
         ) -> Measurement:
             """Build a Measurement for a GroupByBoundedSum query."""
             return self.build_groupby_bounded_sum(
@@ -1234,7 +1185,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_bounded_average(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         lower: ExactNumber,
@@ -1242,11 +1193,11 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         stability: Any,
         mechanism: NoiseMechanism,
         budget: PrivacyBudget,
-        groupby: GroupBy,
+        groupby: Transformation,
         output_column: str,
     ) -> Measurement:
         """Build a Measurement for a GroupByBoundedAverage query."""
-        return create_average_measurement(
+        return self.backend.require("create_average_measurement")(
             input_domain=input_domain,
             input_metric=input_metric,
             measure_column=measure_column,
@@ -1270,7 +1221,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1287,7 +1238,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1295,7 +1248,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         mid_stability = transformation.stability_function(self.stability)
 
         def _build_groupby_agg_from_groupby(
-            groupby: GroupBy,
+            groupby: Transformation,
         ) -> Measurement:
             """Build a Measurement for a GroupByBoundedAverage query."""
             return self.build_groupby_bounded_average(
@@ -1329,7 +1282,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_bounded_variance(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         lower: ExactNumber,
@@ -1337,11 +1290,11 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         stability: Any,
         mechanism: NoiseMechanism,
         budget: PrivacyBudget,
-        groupby: GroupBy,
+        groupby: Transformation,
         output_column: str,
     ) -> Measurement:
         """Build a Measurement for a GroupByBoundedVariance query."""
-        return create_variance_measurement(
+        return self.backend.require("create_variance_measurement")(
             input_domain=input_domain,
             input_metric=input_metric,
             measure_column=measure_column,
@@ -1365,7 +1318,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1382,7 +1335,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1390,7 +1345,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         mid_stability = transformation.stability_function(self.stability)
 
         def _build_groupby_agg_from_groupby(
-            groupby: GroupBy,
+            groupby: Transformation,
         ) -> Measurement:
             """Build a Measurement for a GroupByBoundedVariance query."""
             return self.build_groupby_bounded_variance(
@@ -1424,7 +1379,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_groupby_bounded_stdev(
         self,
-        input_domain: SparkDataFrameDomain,
+        input_domain: TableDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference, HammingDistance],
         measure_column: str,
         lower: ExactNumber,
@@ -1432,11 +1387,11 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         stability: Any,
         mechanism: NoiseMechanism,
         budget: PrivacyBudget,
-        groupby: GroupBy,
+        groupby: Transformation,
         output_column: str,
     ) -> Measurement:
         """Build a Measurement for a GroupByBoundedStdev query."""
-        return create_standard_deviation_measurement(
+        return self.backend.require("create_standard_deviation_measurement")(
             input_domain=input_domain,
             input_metric=input_metric,
             measure_column=measure_column,
@@ -1460,7 +1415,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1477,7 +1432,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             grouping_columns=groupby_cols,
         )
         transformation = get_table_from_ref(child_transformation, child_ref)
-        mid_domain = cast(SparkDataFrameDomain, transformation.output_domain)
+        mid_domain = self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
         mid_metric = cast(
             Union[IfGroupedBy, HammingDistance, SymmetricDifference],
             transformation.output_metric,
@@ -1485,7 +1442,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         mid_stability = transformation.stability_function(self.stability)
 
         def _build_groupby_agg_from_groupby(
-            groupby: GroupBy,
+            groupby: Transformation,
         ) -> Measurement:
             """Build a Measurement for a GroupByBoundedStdev query."""
             return self.build_groupby_bounded_stdev(
@@ -1519,6 +1476,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
 
     def build_bound_selection_measurement(
         self,
+        # Spark-only, and truthfully so: the GetBounds path that calls this
+        # narrows to a SparkDataFrameDomain, because it goes on to require
+        # UnwrapIfGroupedBy, which only the Spark backend has.
         input_domain: SparkDataFrameDomain,
         input_metric: Union[IfGroupedBy, SymmetricDifference],
         measure_column: str,
@@ -1527,10 +1487,10 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         upper_bound_column: str,
         stability: Any,
         budget: PrivacyBudget,
-        groupby: GroupBy,
+        groupby: Transformation,
     ) -> Measurement:
         """Helper method to build the appropriate bound selection Measurement."""
-        return create_bounds_measurement(
+        return self.backend.require("create_bounds_measurement")(
             input_domain=input_domain,
             input_metric=input_metric,
             measure_column=measure_column,
@@ -1551,7 +1511,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         expr.schema(self.catalog)
 
         if isinstance(expr.groupby_keys, KeySet):
-            groupby_cols = tuple(expr.groupby_keys.dataframe().columns)
+            groupby_cols = tuple(expr.groupby_keys.columns())
             keyset_budget = self._get_zero_budget()
             query_budget = self.adjusted_budget
         else:
@@ -1566,6 +1526,9 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         )
 
         transformation = get_table_from_ref(child_transformation, child_ref)
+        # backend: spark-only until the KeySet package. These three guards stay
+        # narrow because this path goes on to require UnwrapIfGroupedBy, which
+        # only the Spark backend has.
         if not isinstance(transformation.output_domain, SparkDataFrameDomain):
             raise AnalyticsInternalError(
                 "Expected the output domain to be a SparkDataFrameDomain."
@@ -1574,7 +1537,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
         # squares the sensitivity in zCDP, which is a worst-case analysis
         # that we may be able to improve.
         if isinstance(transformation.output_metric, IfGroupedBy):
-            transformation |= UnwrapIfGroupedBy(
+            transformation |= self.backend.require("UnwrapIfGroupedBy")(
                 transformation.output_domain, transformation.output_metric
             )
 
@@ -1606,7 +1569,7 @@ class BaseMeasurementVisitor(QueryExprVisitor):
             )
 
         def _build_groupby_agg_from_groupby(
-            groupby: GroupBy,
+            groupby: Transformation,
         ) -> Measurement:
             """Build a Measurement for a GetBounds query."""
             return self.build_bound_selection_measurement(
@@ -1650,8 +1613,15 @@ class BaseMeasurementVisitor(QueryExprVisitor):
                 f"{type(child_measurement)} instead."
             )
 
-        def suppression_function(df: DataFrame) -> DataFrame:
+        # Bound outside the closure so the measurement carries the backend it
+        # was compiled for, not whatever `self` looks like when it runs. The
+        # dispatch matters: pandas' DataFrame.filter selects *columns by
+        # label*, so the Spark spelling silently returns every row and no
+        # columns there instead of suppressing.
+        suppress_below = self.backend.suppress_below
+
+        def suppression_function(df):
             """Suppress rows where the column is less than the desired threshold."""
-            return df.filter(df[expr.column] >= expr.threshold)
+            return suppress_below(df, expr.column, expr.threshold)
 
         return (PostProcess(child_measurement, suppression_function), noise_info)

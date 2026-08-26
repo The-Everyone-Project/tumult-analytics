@@ -17,9 +17,11 @@ from tmlt.core.metrics import DictMetric
 from tmlt.core.transformations.base import Transformation
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._catalog import Catalog
 from tmlt.analytics._noise_info import NoiseInfo
 from tmlt.analytics._query_expr import QueryExpr
+from tmlt.analytics._query_expr_compiler._backend_support import check_supported
 from tmlt.analytics._query_expr_compiler._measurement_visitor import MeasurementVisitor
 from tmlt.analytics._query_expr_compiler._rewrite_rules import CompilationInfo, rewrite
 from tmlt.analytics._query_expr_compiler._transformation_visitor import (
@@ -72,11 +74,17 @@ class QueryExprCompiler:
     * :class:`~tmlt.analytics._query_expr.GroupByQuantile`
     """
 
-    def __init__(self, output_measure: Union[PureDP, ApproxDP, RhoZCDP] = PureDP()):
+    def __init__(
+        self,
+        output_measure: Union[PureDP, ApproxDP, RhoZCDP] = PureDP(),
+        *,
+        backend: Backend = SPARK,
+    ):
         """Constructor.
 
         Args:
             output_measure: Distance measure for measurement's output.
+            backend: The backend to compile the query for.
         """
         # TODO(#1547): Can be removed when issue is resolved.
         self._mechanism = (
@@ -85,6 +93,12 @@ class QueryExprCompiler:
             else CoreNoiseMechanism.DISCRETE_GAUSSIAN
         )
         self._output_measure = output_measure
+        self._backend = backend
+
+    @property
+    def backend(self) -> Backend:
+        """Return the backend this compiler targets."""
+        return self._backend
 
     @property
     def mechanism(self) -> CoreNoiseMechanism:
@@ -101,9 +115,28 @@ class QueryExprCompiler:
         """Return the distance measure for the measurement's output."""
         return self._output_measure
 
-    @staticmethod
-    def query_schema(query: QueryExpr, catalog: Catalog) -> Schema:
-        """Return the schema created by a given query."""
+    def query_schema(self, query: QueryExpr, catalog: Catalog) -> Schema:
+        """Return the schema created by a given query.
+
+        Every entry point into compilation comes through here -- ``evaluate``
+        and ``create_view`` to validate the query, ``describe`` for the schema
+        itself -- so this is where a query the backend cannot answer is
+        rejected. It is rejected *before* the schema is computed: validating a
+        query is not free (a ``Filter`` checks its condition against a real
+        ``SparkSession``), and none of that should happen for a query that was
+        never going to run.
+
+        The backend checked against is this compiler's own. It used to come from
+        the catalog, which was a second place the answer was written down and so
+        a second place it could be wrong: a catalog constructed without one says
+        Spark, and a pandas compiler handed such a catalog would have validated
+        the query against Spark's feature set and refused nothing.
+
+        Raises:
+            NotSupportedByBackend: If this compiler's backend cannot answer the
+                query. Nothing has been built and no budget spent when it does.
+        """
+        check_supported(query, self._backend)
         schema = query.schema(catalog)
         if not isinstance(schema, Schema):
             raise AnalyticsInternalError(
@@ -131,8 +164,9 @@ class QueryExprCompiler:
             input_metric: The input metric of the compiled query.
             catalog: The catalog, used only for query validation.
         """
-        # Computing the schema validates that the query is well-formed.
-        query.schema(catalog)
+        # Computing the schema validates that the query is well-formed, and
+        # that this backend can answer it at all.
+        self.query_schema(query, catalog)
 
         # Compilation happens in two stages: first, we apply rewrite rules...
         compilation_info = CompilationInfo(
@@ -150,6 +184,7 @@ class QueryExprCompiler:
             output_measure=self._output_measure,
             default_mechanism=self._mechanism,
             catalog=catalog,
+            backend=self._backend,
         )
 
         measurement, noise_info = query.accept(visitor)
@@ -204,16 +239,18 @@ class QueryExprCompiler:
             input_metric: The input metric of the compiled query.
             catalog: The catalog, used only for query validation.
         """
-        # Computing the schema validates that the query is well-formed. It's useful to
-        # perform this check here in addition to __call__ so validation errors can be
-        # raised at view creation, not just query evaluation.
-        query.schema(catalog)
+        # Computing the schema validates that the query is well-formed, and that
+        # this backend can answer it at all. It's useful to perform this check
+        # here in addition to __call__ so validation errors can be raised at
+        # view creation, not just query evaluation.
+        self.query_schema(query, catalog)
 
         transformation_visitor = TransformationVisitor(
             input_domain=input_domain,
             input_metric=input_metric,
             mechanism=self.mechanism,
             catalog=catalog,
+            backend=self._backend,
         )
         transformation, reference, constraints = query.accept(transformation_visitor)
         if not isinstance(transformation, Transformation):

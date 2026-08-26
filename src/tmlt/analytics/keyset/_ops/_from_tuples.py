@@ -7,8 +7,10 @@ import datetime
 from dataclasses import dataclass
 from typing import Literal, Optional, Union, overload
 
+import pandas as pd
 from pyspark.sql import DataFrame, SparkSession
 
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._schema import (
     ColumnDescriptor,
     FrozenDict,
@@ -17,6 +19,7 @@ from tmlt.analytics._schema import (
 )
 
 from ._base import KeySetOp
+from ._frames import pandas_frame_from_tuples
 from ._utils import validate_schema
 
 
@@ -45,7 +48,7 @@ class FromTuples(KeySetOp):
         """Get the schema of the output of this operation."""
         return dict(self.column_descriptors)
 
-    def dataframe(self) -> DataFrame:
+    def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.
 
         This operation may be computationally expensive, even though the full
@@ -65,6 +68,14 @@ class FromTuples(KeySetOp):
             schema=schema,
         )
 
+    def _pandas_dataframe(self) -> pd.DataFrame:
+        """Generate the pandas dataframe corresponding to this operation.
+
+        The tuples are already in memory and already deduplicated -- they are
+        held as a frozenset -- so this is just a frame built around them.
+        """
+        return pandas_frame_from_tuples(self.tuples, self.column_descriptors)
+
     def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""
         return len(self.column_descriptors) > 0 and len(self.tuples) == 0
@@ -74,15 +85,15 @@ class FromTuples(KeySetOp):
         return False
 
     @overload
-    def size(self, fast: Literal[True]) -> Optional[int]: ...
+    def size(self, fast: Literal[True], backend: Backend = SPARK) -> Optional[int]: ...
 
     @overload
-    def size(self, fast: Literal[False]) -> int: ...
+    def size(self, fast: Literal[False], backend: Backend = SPARK) -> int: ...
 
     @overload
-    def size(self, fast: bool) -> Optional[int]: ...
+    def size(self, fast: bool, backend: Backend = SPARK) -> Optional[int]: ...
 
-    def size(self, fast):
+    def size(self, fast, backend=SPARK):
         """Determine the size of the KeySet resulting from this operation."""
         if len(self.column_descriptors) == 0:
             return 1

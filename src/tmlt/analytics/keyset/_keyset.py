@@ -8,17 +8,21 @@ from __future__ import annotations
 import datetime
 from collections.abc import Sequence
 from functools import reduce
-from typing import Any, Collection, Iterable, Mapping, Optional, overload
+from typing import Any, Collection, Iterable, Mapping, Optional, cast, overload
 
+import pandas as pd
 from pyspark.sql import Column, DataFrame
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import SPARK, Backend
+from tmlt.analytics._coerce_pandas_schema import coerce_pandas_schema_or_fail
 from tmlt.analytics._schema import ColumnDescriptor, ColumnType, FrozenDict
 
 from ._ops import (
     CrossJoin,
     Detect,
     Filter,
+    FromPandasDataFrame,
     FromSparkDataFrame,
     FromTuples,
     Join,
@@ -27,6 +31,15 @@ from ._ops import (
     Subtract,
     Union,
     rewrite,
+)
+from ._ops._frames import (
+    FrameKind,
+    KeySetFrame,
+    cast_to_schema,
+    frame_count,
+    frame_kind,
+    frame_rows,
+    select_columns,
 )
 
 
@@ -69,7 +82,12 @@ class KeySet:
             )
         self._op_tree = rewrite(op_tree)
         self._columns = columns
-        self._dataframe: Optional[DataFrame] = None
+        # One materialized frame per kind of frame, rather than one frame: the
+        # two hold the same keys but are different objects, and a caller that
+        # asks for both should not pay for either twice. Note that a pandas
+        # frame cannot be tested for with `if frame:` -- pandas raises on a
+        # frame's truth value -- so these are always compared against None.
+        self._dataframes: dict[FrameKind, KeySetFrame] = {}
         self._size: Optional[int] = None
         self._cached = False
 
@@ -88,6 +106,34 @@ class KeySet:
         dataframe may raise exceptions or have other unanticipated effects.
         """
         return KeySet(FromSparkDataFrame(df), columns=df.columns)
+
+    @staticmethod
+    def from_pandas(df: pd.DataFrame) -> KeySet:
+        """Creates a KeySet from a pandas dataframe.
+
+        This is :meth:`from_dataframe` for keys that are already in memory. The
+        dataframe should contain every combination of values being selected in
+        the KeySet; if there are duplicate rows, only one copy of each is kept.
+
+        Unlike :meth:`from_dataframe`, this method copies the dataframe it is
+        given, so the KeySet is unaffected by later changes to it -- and the
+        resulting KeySet can be materialized on either backend, since its keys
+        are in memory either way.
+
+        Example:
+            >>> import pandas as pd
+            >>> df = pd.DataFrame({"A": ["a1", "a2"], "B": [1, 2]})
+            >>> keyset = KeySet.from_pandas(df)
+            >>> keyset.dataframe().sort("A", "B").toPandas()
+                A  B
+            0  a1  1
+            1  a2  2
+        """
+        # coerce_pandas_schema_or_fail always returns a copy: from here on the
+        # keys belong to the KeySet, and neither it nor the caller can change
+        # what the other sees.
+        coerced = coerce_pandas_schema_or_fail(df)
+        return KeySet(FromPandasDataFrame(coerced), columns=list(coerced.columns))
 
     @staticmethod
     def from_tuples(
@@ -458,50 +504,122 @@ class KeySet:
         schema = self._op_tree.schema()
         return {c: schema[c] for c in self.columns()}  # Reorder to match self.columns()
 
-    def dataframe(self) -> DataFrame:
+    def _materialize(self, kind: FrameKind) -> KeySetFrame:
+        """Returns this KeySet's keys as a frame of the given kind.
+
+        The frame is cached per kind, so asking twice evaluates the op-tree
+        once, and asking for the other kind does not discard the first.
+        """
+        frame = self._dataframes.get(kind)
+        if frame is not None:
+            return frame
+
+        frame = self._op_tree.frame(kind)
+        if set(frame.columns) != set(self.columns()):
+            raise AnalyticsInternalError(
+                f"KeySet op-tree dataframe produced columns {list(frame.columns)} "
+                f"that do not match its expected columns {self.columns()}."
+            )
+        # Reorder to match self.columns()
+        frame = select_columns(frame, self.columns())
+        if isinstance(frame, pd.DataFrame):
+            # ...and put every column in the canonical dtype for its descriptor,
+            # so that the frame is in the domain this KeySet's schema describes.
+            frame = cast_to_schema(frame, self.schema())
+        elif self._cached:
+            frame.cache()
+
+        self._dataframes[kind] = frame
+        return frame
+
+    def dataframe(self, backend: Backend = SPARK) -> DataFrame:
         """Returns the dataframe associated with this KeySet.
 
         This dataframe contains every combination of values being selected in
         the KeySet, and its rows are guaranteed to be unique.
+
+        Args:
+            backend: The backend whose kind of dataframe to produce. Defaults to
+                Spark, and a Spark :class:`~pyspark.sql.DataFrame` is what this
+                method is for; :meth:`to_pandas` is the typed way to ask for the
+                keys in memory.
         """
-        if not self._dataframe:
-            df = self._op_tree.dataframe()
-            if set(df.columns) != set(self.columns()):
-                raise AnalyticsInternalError(
-                    f"KeySet op-tree dataframe produced columns {df.columns} that "
-                    f"do not match its expected columns {self.columns()}."
-                )
-            # Reorder to match self.columns()
-            self._dataframe = df.select(*self.columns())
-            if self._cached:
-                self._dataframe.cache()
+        return cast(DataFrame, self._materialize(frame_kind(backend)))
 
-        return self._dataframe
+    def to_pandas(self) -> pd.DataFrame:
+        """Returns this KeySet's keys as a pandas dataframe.
 
-    def size(self) -> int:
+        This is :meth:`dataframe` with the keys built in memory instead of in
+        Spark: the same keys, in the same column order, with each column in the
+        dtype this KeySet's :meth:`schema` calls for.
+
+        Not every KeySet can be built this way. One made from a Spark dataframe
+        cannot -- collecting a distributed frame is a decision for its owner to
+        make -- and neither can one that has been filtered with :meth:`filter`,
+        since a filter condition is a Spark expression. Both raise
+        :class:`~tmlt.analytics._backends.NotSupportedByBackend`.
+
+        Example:
+            >>> keyset = KeySet.from_tuples([("a1", 1), ("a2", 2)], ["A", "B"])
+            >>> keyset.to_pandas().sort_values(["A", "B"], ignore_index=True)
+                A  B
+            0  a1  1
+            1  a2  2
+        """
+        return cast(pd.DataFrame, self._materialize(FrameKind.PANDAS))
+
+    def size(self, backend: Backend = SPARK) -> int:
         """Returns the number of groups included in this KeySet.
 
         Note that in some situations this method may need to count the elements
         in the KeySet's dataframe, which can be extremely slow.
+
+        Args:
+            backend: The backend to count on, where counting requires
+                materializing the KeySet. The answer does not depend on it.
         """
         if self._size is None:
-            self._size = self._op_tree.size(fast=False)
+            # A frame this KeySet has already built has the answer in it, and
+            # asking the op-tree instead would build a second one -- on pandas,
+            # redoing the whole coerce-and-deduplicate. Which frame does not
+            # matter: both hold the same keys.
+            #
+            # Except for a KeySet with no columns, which is the total
+            # aggregation: it stands for the one group that is the whole table,
+            # and is spelled as a frame with no rows. Its size is one and its
+            # frame's row count is zero, so that one has to be asked of the
+            # op-tree.
+            cached = next(iter(self._dataframes.values()), None)
+            if cached is not None and self.columns():
+                self._size = frame_count(cached)
+            else:
+                self._size = self._op_tree.size(fast=False, backend=backend)
         return self._size
 
     def cache(self) -> None:
-        """Caches the KeySet's dataframe in memory."""
+        """Caches the KeySet's dataframe in memory.
+
+        This is a Spark cache, and applies to the Spark dataframe alone. A
+        pandas frame is already in memory, and :meth:`to_pandas` already keeps
+        the one it built.
+        """
         # Caching an already-cached dataframe produces a warning, so avoid doing
         # it by only caching the dataframe when the KeySet isn't already cached.
         if not self._cached:
             self._cached = True
-            if self._dataframe:
-                self._dataframe.cache()
+            spark_dataframe = self._dataframes.get(FrameKind.SPARK)
+            if spark_dataframe is not None:
+                cast(DataFrame, spark_dataframe).cache()
 
     def uncache(self) -> None:
-        """Removes the KeySet's dataframe from memory and disk."""
+        """Removes the KeySet's dataframe from memory and disk.
+
+        Like :meth:`cache`, this concerns the Spark dataframe alone.
+        """
         self._cached = False
-        if self._dataframe:
-            self._dataframe.unpersist()
+        spark_dataframe = self._dataframes.get(FrameKind.SPARK)
+        if spark_dataframe is not None:
+            cast(DataFrame, spark_dataframe).unpersist()
 
     def is_equivalent(self, other: KeySet | KeySetPlan) -> Optional[bool]:
         """Determine if another KeySet is equivalent to this one, if possible.
@@ -538,6 +656,22 @@ class KeySet:
         Two KeySets are equal if they contain the same values for the same
         columns; the rows and columns may appear in any order.
 
+        When :meth:`is_equivalent` cannot answer from the op-trees alone, the
+        keys have to be built and compared. Which engine builds them is decided
+        here rather than passed in -- ``==`` takes no arguments, and a KeySet is
+        compared in places that know nothing about backends: two frozen
+        :class:`~tmlt.analytics.Query` dataclasses holding KeySets, or a KeySet
+        looked up in a dict, whose :meth:`__hash__` hashes only the schema and
+        so leaves every collision to be settled here.
+
+        So the choice is inferred. If both op-trees can be materialized in
+        memory -- a pure walk of the two trees, which builds nothing -- the
+        comparison is done on pandas frames; otherwise it is done on Spark, as
+        it always was. That keeps a comparison of two ordinary KeySets from
+        starting a JVM, which on a pandas Session was the whole cost: the trees
+        are usually small literal data that was in memory to begin with, and
+        the Spark path would have shipped it out to be brought back.
+
         Example:
             >>> ks1 = KeySet.from_dict({"A": [1, 2], "B": [3, 4]})
             >>> ks2 = KeySet.from_dict({"B": [3, 4], "A": [1, 2]})
@@ -559,6 +693,16 @@ class KeySet:
 
         # Reorder columns between the two dataframes to match
         columns = self.columns()
+        if not (
+            self._op_tree.unsupported_frame_ops(FrameKind.PANDAS)
+            or other._op_tree.unsupported_frame_ops(FrameKind.PANDAS)
+        ):
+            # Multisets of null-tagged rows, so that a duplicated row and a null
+            # turning into a NaN are both differences; see frame_rows.
+            return frame_rows(self.to_pandas(), columns) == frame_rows(
+                other.to_pandas(), columns
+            )
+
         self_df = self.dataframe().select(*columns)
         other_df = other.dataframe().select(*columns)
         # other_df should contain all rows in self_df

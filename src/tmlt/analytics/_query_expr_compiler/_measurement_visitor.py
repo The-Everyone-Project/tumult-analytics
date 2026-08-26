@@ -5,19 +5,11 @@
 
 from typing import List, Tuple
 
-from tmlt.core.domains.spark_domains import SparkDataFrameDomain
-from tmlt.core.measurements.aggregations import (
-    NoiseMechanism,
-    create_partition_selection_measurement,
-)
+from tmlt.core.measurements.aggregations import NoiseMechanism
 from tmlt.core.measurements.base import Measurement
 from tmlt.core.measurements.postprocess import PostProcess
 from tmlt.core.metrics import HammingDistance, IfGroupedBy, SymmetricDifference
 from tmlt.core.transformations.base import Transformation
-from tmlt.core.transformations.converters import UnwrapIfGroupedBy
-from tmlt.core.transformations.spark_transformations.select import (
-    Select as SelectTransformation,
-)
 from tmlt.core.utils.misc import get_nonconflicting_string
 
 from tmlt.analytics import AnalyticsInternalError
@@ -47,6 +39,7 @@ class MeasurementVisitor(BaseMeasurementVisitor):
             input_metric=self.input_metric,
             mechanism=mechanism,
             catalog=self.catalog,
+            backend=self.backend,
         )
         child, reference, constraints = expr.accept(tv)
 
@@ -62,7 +55,9 @@ class MeasurementVisitor(BaseMeasurementVisitor):
         **kwargs,
     ) -> Tuple[Transformation, TableReference]:
         """Enforce a constraint after a child transformation."""
-        return constraint._enforce(child_transformation, child_ref, **kwargs)
+        return constraint._enforce(
+            child_transformation, child_ref, backend=self.backend, **kwargs
+        )
 
     def visit_get_groups(self, expr: GetGroups) -> Tuple[Measurement, NoiseInfo]:
         """Create a measurement from a GetGroups query expression."""
@@ -95,23 +90,21 @@ class MeasurementVisitor(BaseMeasurementVisitor):
         )
 
         transformation = get_table_from_ref(child_transformation, child_ref)
-        if not isinstance(transformation.output_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                "Expected GetGroups to receive a SparkDataFrameDomain, but got "
-                f"{transformation.output_domain} instead."
-            )
+        # The domain is checked again after each step below, because each step
+        # replaces it.
+        self.backend.table_domain(
+            transformation.output_domain, "the truncated table's domain"
+        )
 
         # squares the sensitivity in zCDP, which is a worst-case analysis
         # that we may be able to improve.
         if isinstance(transformation.output_metric, IfGroupedBy):
-            transformation |= UnwrapIfGroupedBy(
+            transformation |= self.backend.require("UnwrapIfGroupedBy")(
                 transformation.output_domain, transformation.output_metric
             )
-        if not isinstance(transformation.output_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                "Expected GetGroups to receive a SparkDataFrameDomain, but got "
-                f"{transformation.output_domain} instead."
-            )
+        self.backend.table_domain(
+            transformation.output_domain, "the unwrapped table's domain"
+        )
         if not isinstance(
             transformation.output_metric,
             (IfGroupedBy, HammingDistance, SymmetricDifference),
@@ -121,25 +114,21 @@ class MeasurementVisitor(BaseMeasurementVisitor):
                 f"{transformation.output_metric} instead."
             )
 
-        transformation |= SelectTransformation(
+        transformation |= self.backend.require("Select")(
             transformation.output_domain, transformation.output_metric, list(columns)
         )
 
         mid_stability = transformation.stability_function(self.stability)
-        if not isinstance(transformation.output_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                "Expected GetGroups to receive a SparkDataFrameDomain, but got "
-                f"{transformation.output_domain} instead."
-            )
+        output_domain = self.backend.table_domain(
+            transformation.output_domain, "the selected table's domain"
+        )
         count_column = "count"
-        if count_column in set(transformation.output_domain.schema):
-            count_column = get_nonconflicting_string(
-                list(transformation.output_domain.schema)
-            )
+        if count_column in set(output_domain.schema):
+            count_column = get_nonconflicting_string(list(output_domain.schema))
 
         epsilon, delta = self.budget.value
-        agg = create_partition_selection_measurement(
-            input_domain=transformation.output_domain,
+        agg = self.backend.require("create_partition_selection_measurement")(
+            input_domain=output_domain,
             epsilon=epsilon,
             delta=delta,
             d_in=mid_stability,

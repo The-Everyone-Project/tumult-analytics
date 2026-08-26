@@ -41,7 +41,16 @@ from tmlt.core.utils.type_utils import assert_never
 from typeguard import check_type, typechecked
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import (
+    DATAFRAME_DOMAIN_TYPES,
+    SPARK,
+    Backend,
+    NotSupportedByBackend,
+    backend_for_dataframe,
+    backend_for_domain,
+)
 from tmlt.analytics._base_builder import (
+    AnyDataFrame,
     BaseBuilder,
     DataFrameMixin,
     PrivacyBudgetMixin,
@@ -108,6 +117,42 @@ from tmlt.analytics.query_builder import (
 )
 
 __all__ = ["Session"]
+
+
+def _backend_for_accountant_domain(domain: DictDomain) -> Backend:
+    """Return the backend whose tables a Session accountant's domain holds.
+
+    A Session is handed an accountant, not a backend, and the accountant's input
+    domain is the only record of which backend built it: a dictionary -- nested
+    one level deeper for tables in an ID space -- whose leaves are table
+    domains. Those leaves all belong to one backend, since the tables were added
+    together through one builder, and this recovers which.
+
+    The tables walked are the ones the Session considers its own -- the same
+    ones :attr:`Session.private_sources` lists -- so that the backend is derived
+    from exactly the tables that will be queried.
+
+    Args:
+        domain: The accountant's input domain.
+
+    Raises:
+        AnalyticsInternalError: If the domain holds no tables, if one of them is
+            not a table domain, or if they disagree about their backend.
+    """
+    backends = {
+        backend_for_domain(lookup_domain(domain, ref))
+        for ref in find_named_tables(domain)
+    }
+    if not backends:
+        raise AnalyticsInternalError(
+            "A Session's input domain must contain at least one table."
+        )
+    if len(backends) > 1:
+        raise AnalyticsInternalError(
+            "A Session's tables must all be on one backend, but its input domain"
+            f" holds tables of {', '.join(sorted(b.name for b in backends))}."
+        )
+    return backends.pop()
 
 
 def _generate_neighboring_relation(sources: Dict[str, PrivateDataFrame]) -> Conjunction:
@@ -324,6 +369,7 @@ class Session:
             raise ValueError("The input metric to a session must be a DictMetric.")
         if not isinstance(self._accountant.input_domain, DictDomain):
             raise ValueError("The input domain to a session must be a DictDomain.")
+        self._backend = _backend_for_accountant_domain(self._accountant.input_domain)
         self._public_sources = public_sources
         # Note: Currently, only NamedTable identifiers make sense as keys here,
         #     and we may assume that no other types of identifiers are included.
@@ -341,6 +387,10 @@ class Session:
         protected_change: ProtectedChange,
     ) -> "Session":
         """Initializes a DP session from a Spark dataframe.
+
+        This constructor is Spark-only. A Session on another backend is built
+        through :class:`~tmlt.analytics.Session.Builder`, which takes that
+        backend's tables.
 
         Only one private data source is supported with this initialization
         method; if you need multiple data sources, use
@@ -405,7 +455,7 @@ class Session:
     def _create_accountant_from_neighboring_relation(
         cls: Type["Session"],
         privacy_budget: PrivacyBudget,
-        private_sources: Dict[str, DataFrame],
+        private_sources: Dict[str, AnyDataFrame],
         relation: NeighboringRelation,
     ) -> Tuple[PrivacyAccountant, Any]:
         output_measure: Union[PureDP, ApproxDP, RhoZCDP]
@@ -436,10 +486,20 @@ class Session:
         # raising exception if not.
         relation.validate_input(private_sources)
 
+        # The visitor mints the accountant's domains in whichever
+        # representation the tables arrived in. A mixed dict was already
+        # rejected at the Builder, so the first table names the backend for
+        # all of them.
+        backend = (
+            backend_for_dataframe(next(iter(private_sources.values())))
+            if private_sources
+            else SPARK
+        )
+
         # Wrap relation in a Conjunction so that output is appropriate for
         # PrivacyAccountant
         domain, metric, distance, dataframes = Conjunction(relation).accept(
-            NeighboringRelationCoreVisitor(private_sources, output_measure)
+            NeighboringRelationCoreVisitor(private_sources, output_measure, backend)
         )
 
         measurement = SequentialComposition(
@@ -457,7 +517,7 @@ class Session:
     def _from_neighboring_relation(
         cls: Type["Session"],
         privacy_budget: PrivacyBudget,
-        private_sources: Dict[str, DataFrame],
+        private_sources: Dict[str, AnyDataFrame],
         relation: NeighboringRelation,
     ) -> "Session":
         """Initializes a DP session using the provided :class:`NeighboringRelation`.
@@ -704,7 +764,7 @@ class Session:
         groupby_keys: Optional[Union[KeySet, Tuple[str, ...]]] = None,
     ) -> str:
         """Build a description of a query object."""
-        compiler = QueryExprCompiler(self._output_measure)
+        compiler = QueryExprCompiler(self._output_measure, backend=self._backend)
         schema = compiler.query_schema(query_obj, self._catalog)
         description = _describe_schema(schema)
         constraints: Optional[List[Constraint]] = None
@@ -715,6 +775,13 @@ class Session:
                 input_metric=self._input_metric,
                 catalog=self._catalog,
             )[2]
+        except NotSupportedByBackend:
+            # This one is a real failure: the query names an operation this
+            # backend does not have, and describing it as though it had
+            # succeeded would tell the user their query is fine when evaluating
+            # it will not be. It is caught before the clause below only because
+            # it is a NotImplementedError, which that clause swallows.
+            raise
         except NotImplementedError:
             # If the query results in a measurement, this will happen.
             # There are no constraints on measurements, so we can just
@@ -731,7 +798,7 @@ class Session:
             description += "\nGrouped on columns "
             col_strs = [f"'{col}'" for col in groupby_keys.schema()]
             description += ", ".join(col_strs)
-            description += f" ({groupby_keys.size()} groups)"
+            description += f" ({groupby_keys.size(self._backend)} groups)"
         return description
 
     def _spend_budget_without_executing(
@@ -786,8 +853,10 @@ class Session:
         ref = find_reference(source_id, self._input_domain)
         if ref is not None:
             domain = lookup_domain(self._input_domain, ref)
-            return spark_dataframe_domain_to_analytics_columns(domain)
+            return self._backend.domain_to_analytics_columns(domain)
 
+        # Public tables are Spark-only whatever the private tables are on, so
+        # this side does not go through the backend.
         try:
             return spark_schema_to_analytics_columns(
                 self.public_source_dataframes[source_id].schema
@@ -893,16 +962,59 @@ class Session:
 
     @property
     def _catalog(self) -> Catalog:
-        """Returns a Catalog of tables in the Session."""
+        """Returns a Catalog of tables in the Session.
+
+        Built from one walk of the input domain. The four public accessors --
+        :meth:`get_schema`, :meth:`get_grouping_column`, :meth:`get_id_column`
+        and :meth:`get_id_space` -- answer the same four questions, and the
+        catalog used to be assembled by calling them; but each of them starts
+        by searching the whole domain for the table again, and each is
+        ``@typechecked``, so a Session with N tables did 4N searches and 4N
+        runtime type checks to describe N tables. Every entry point into
+        compilation builds a catalog, so that cost is paid per query. The
+        accessors remain the API; this just stops routing through them.
+
+        The two do produce the same catalog: the loop below is what the four of
+        them do, with the search hoisted out and shared.
+        """
         catalog = Catalog()
-        for table in self.private_sources:
+        domain = self._input_domain
+        metric = self._input_metric
+        for ref in find_named_tables(domain):
+            identifier = ref.identifier
+            if not isinstance(identifier, NamedTable):
+                raise AnalyticsInternalError(
+                    f"Expected a named table but got {identifier} instead."
+                )
+            name = identifier.name
+            # get_grouping_column and get_id_column, which read the same metric
+            # and are distinguished only by what it is grouped by.
+            grouping_column: Optional[str] = None
+            id_column: Optional[str] = None
+            table_metric = lookup_metric(metric, ref)
+            if isinstance(table_metric, IfGroupedBy):
+                if isinstance(table_metric.inner_metric, (SumOf, RootSumOfSquared)):
+                    grouping_column = list(table_metric.columns)[0]
+                elif isinstance(table_metric.inner_metric, SymmetricDifference):
+                    id_column = list(table_metric.columns)[0]
+            # get_id_space. Tables not in an ID space have a parent of ([]);
+            # otherwise the parent is the TableCollection naming the space.
+            id_space: Optional[str] = None
+            if ref.parent != TableReference([]):
+                parent_identifier = ref.parent.identifier
+                if not isinstance(parent_identifier, TableCollection):
+                    raise AnalyticsInternalError(
+                        "Expected parent to be a table collection but got"
+                        f" {parent_identifier} instead."
+                    )
+                id_space = parent_identifier.name
             catalog.add_private_table(
-                table,
-                self.get_schema(table),
-                constraints=self._table_constraints[NamedTable(table)],
-                grouping_column=self.get_grouping_column(table),
-                id_column=self.get_id_column(table),
-                id_space=self.get_id_space(table),
+                name,
+                self._backend.domain_to_analytics_columns(lookup_domain(domain, ref)),
+                constraints=self._table_constraints[NamedTable(name)],
+                grouping_column=grouping_column,
+                id_column=id_column,
+                id_space=id_space,
             )
         for table in self.public_sources:
             catalog.add_public_table(
@@ -915,6 +1027,10 @@ class Session:
     @typechecked
     def add_public_dataframe(self, source_id: str, dataframe: DataFrame):
         """Adds a public data source to the session.
+
+        Public tables are Spark DataFrames whatever the Session's private tables
+        are, so this takes a Spark one on every backend -- and on a backend with
+        no join-public, refuses it, since nothing could ever read it.
 
         Not all Spark column types are supported in public sources; see
         :class:`~tmlt.analytics.ColumnType` for information about which types are
@@ -960,12 +1076,23 @@ class Session:
         Args:
             source_id: The name of the public data source.
             dataframe: The public data source corresponding to the ``source_id``.
+
+        Raises:
+            NotSupportedByBackend: If this Session's backend has no join-public.
+                Public tables exist to be joined against, and no backend other
+                than Spark has a public join yet.
         """
+        if self._backend.ops.PublicJoin is None:
+            raise NotSupportedByBackend.for_op(
+                "Public tables",
+                self._backend.name,
+                f"Table '{source_id}' cannot be added: this backend has no"
+                " join-public, so a public table on it could never be read.",
+            )
         assert_is_identifier(source_id)
         if source_id in self.public_sources or source_id in self.private_sources:
             raise ValueError(f"This session already has a table named '{source_id}'.")
-        dataframe = coerce_spark_schema_or_fail(dataframe)
-        self._public_sources[source_id] = dataframe
+        self._public_sources[source_id] = coerce_spark_schema_or_fail(dataframe)
 
     def _compile_and_get_info(
         self,
@@ -988,7 +1115,9 @@ class Session:
 
         adjusted_budget = self._process_requested_budget(privacy_budget)
 
-        measurement, noise_info = QueryExprCompiler(self._output_measure)(
+        measurement, noise_info = QueryExprCompiler(
+            self._output_measure, backend=self._backend
+        )(
             query=query_expr,
             privacy_budget=adjusted_budget,
             stability=self._accountant.d_in,
@@ -1104,10 +1233,65 @@ class Session:
             privacy_budget: The privacy budget used for the query.
         """
         check_type(query_expr, Query)
-        query = query_expr._query_expr
         measurement, adjusted_budget, _ = self._compile_and_get_info(
-            query, privacy_budget
+            query_expr._query_expr, privacy_budget
         )
+        return self._evaluate_compiled(measurement, adjusted_budget, privacy_budget)
+
+    def _evaluate_with_noise_info(
+        self,
+        query_expr: Query,
+        privacy_budget: PrivacyBudget,
+    ) -> Tuple[Any, List[Dict[str, Any]]]:
+        """Answers a query, and describes the noise the answer carries.
+
+        :meth:`evaluate` and :meth:`_noise_info` each compile the query, so
+        asking for both -- which is what a caller who wants to report the noise
+        alongside the answer has to do -- compiles it twice. This does it once.
+
+        Compiling twice is not merely slower. The noise information a caller
+        reports is supposed to describe the answer it is reported with, and two
+        compilations only produce the same measurement while nothing about the
+        Session has changed in between; a view created, or a constraint
+        enforced, between the two calls would silently make the report describe
+        a measurement that never ran. Here there is one measurement and one
+        budget, so that cannot come apart -- the invariant is structural rather
+        than a rule the caller has to follow.
+
+        Args:
+            query_expr: One query expression to answer.
+            privacy_budget: The privacy budget used for the query.
+
+        Returns:
+            The answer, and the noise information for the measurement that
+            produced it.
+        """
+        check_type(query_expr, Query)
+        measurement, adjusted_budget, noise_info = self._compile_and_get_info(
+            query_expr._query_expr, privacy_budget
+        )
+        answer = self._evaluate_compiled(measurement, adjusted_budget, privacy_budget)
+        return answer, list(iter(noise_info))
+
+    def _evaluate_compiled(
+        self,
+        measurement: Measurement,
+        adjusted_budget: PrivacyBudget,
+        privacy_budget: PrivacyBudget,
+    ) -> Any:
+        """Runs an already-compiled measurement against the accountant.
+
+        The half of :meth:`evaluate` that follows compilation, factored out so
+        that :meth:`_evaluate_with_noise_info` can reach it with a measurement
+        it compiled itself.
+
+        Args:
+            measurement: The compiled measurement to run.
+            adjusted_budget: The budget it was compiled for, and the ``d_out``
+                it is measured at.
+            privacy_budget: The budget the caller asked for, which the
+                insufficient-budget message is phrased in terms of.
+        """
         self._activate_accountant()
 
         if xor(
@@ -1121,13 +1305,6 @@ class Session:
             )
 
         try:
-            if not measurement.privacy_relation(
-                self._accountant.d_in, adjusted_budget.value
-            ):
-                raise AnalyticsInternalError(
-                    "With these inputs and this privacy budget, similar inputs will"
-                    " *not* produce similar outputs."
-                )
             try:
                 return self._accountant.measure(
                     measurement, d_out=adjusted_budget.value
@@ -1141,6 +1318,26 @@ class Session:
                 raise RuntimeError(
                     "Cannot answer query without exceeding the Session privacy budget."
                     + msg
+                ) from err
+            except ValueError as err:
+                # The privacy relation is not checked before measure() is
+                # called, because measure() checks it itself -- and so does the
+                # SequentialQueryable underneath it -- each of them before any
+                # budget is subtracted. Evaluating the relation is the
+                # expensive part of answering a small query, and a third
+                # evaluation bought nothing but the wording below.
+                #
+                # So ask it only now, and only to find out whether the relation
+                # is what Core objected to: measure() raises several other
+                # ValueErrors, about mismatched domains, metrics and measures,
+                # which mean something else and must not be reworded into this.
+                if measurement.privacy_relation(
+                    self._accountant.d_in, adjusted_budget.value
+                ):
+                    raise
+                raise AnalyticsInternalError(
+                    "With these inputs and this privacy budget, similar inputs will"
+                    " *not* produce similar outputs."
                 ) from err
         except InactiveAccountantError as e:
             raise RuntimeError(
@@ -1225,7 +1422,7 @@ class Session:
         query = query_expr._query_expr
 
         transformation, ref, constraints = QueryExprCompiler(
-            self._output_measure
+            self._output_measure, backend=self._backend
         ).build_transformation(
             query=query,
             input_domain=self._input_domain,
@@ -1233,14 +1430,27 @@ class Session:
             catalog=self._catalog,
         )
         if cache:
+            if self._backend.ops.Persist is None:
+                # Not an error: caching is a performance request, and this
+                # backend's answer to it is that there is nothing to cache -- its
+                # tables are already materialized in memory. Say so rather than
+                # letting the caller believe something happened.
+                warn(
+                    f"Ignoring cache=True for view '{source_id}': the"
+                    f" {self._backend.name} backend has nothing to cache, as its"
+                    " tables are already in memory."
+                )
             transformation, ref = persist_table(
-                base_transformation=transformation, base_ref=ref
+                base_transformation=transformation,
+                base_ref=ref,
+                backend=self._backend,
             )
 
         transformation, _ = rename_table(
             base_transformation=transformation,
             base_ref=ref,
             new_table_id=NamedTable(source_id),
+            backend=self._backend,
         )
         self._accountant.transform_in_place(transformation)
         self._table_constraints[NamedTable(source_id)] = constraints
@@ -1261,18 +1471,18 @@ class Session:
             )
 
         domain = lookup_domain(self._input_domain, ref)
-        if not isinstance(domain, SparkDataFrameDomain):
+        if not isinstance(domain, DATAFRAME_DOMAIN_TYPES):
             raise AnalyticsInternalError(
-                "Expected domain to be a SparkDataFrameDomain, but got"
-                f" {type(domain)} instead."
+                f"Expected domain to be a table domain, but got {type(domain)} instead."
             )
 
         unpersist_source: Transformation = Identity(
             domain=self._input_domain, metric=self._input_metric
         )
-        # Unpersist does nothing if the DataFrame isn't persisted
+        # Unpersist does nothing if the DataFrame isn't persisted, and nothing at
+        # all on a backend that has no persist.
         unpersist_source = unpersist_table(
-            base_transformation=unpersist_source, base_ref=ref
+            base_transformation=unpersist_source, base_ref=ref, backend=self._backend
         )
 
         transformation = delete_table(
@@ -1300,6 +1510,7 @@ class Session:
                 child_ref=child_ref,
                 update_metric=True,
                 use_l2=isinstance(self._output_measure, RhoZCDP),
+                backend=self._backend,
             )
         else:
             if not isinstance(constraint, MaxRowsPerID):
@@ -1310,6 +1521,7 @@ class Session:
                 child_transformation=child_transformation,
                 child_ref=child_ref,
                 update_metric=True,
+                backend=self._backend,
             )
 
     def _create_partition_transformation(
@@ -1554,7 +1766,19 @@ class Session:
             column: The name of the column partitioning on.
             splits: Mapping of split name to value of partition.
                 Split name is ``source_id`` in new session.
+
+        Raises:
+            NotSupportedByBackend: If this Session's backend has no partition
+                transformation. This is checked before anything else, so a
+                rejected partition spends no budget.
         """
+        if self._backend.ops.PartitionByKeys is None:
+            raise NotSupportedByBackend.for_op(
+                "partition_and_create",
+                self._backend.name,
+                f"Table '{source_id}' cannot be partitioned: this backend has no"
+                " partition transformation. No privacy budget has been spent.",
+            )
         # If you remove this if-block, mypy will complain
         if not (
             isinstance(self._accountant.privacy_budget, ExactNumber)

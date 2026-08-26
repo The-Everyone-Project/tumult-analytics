@@ -4,14 +4,18 @@
 # Copyright Tumult Labs 2025
 
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Collection, Literal, Optional, overload
 
+import pandas as pd
 from pyspark.sql import DataFrame
+from tmlt.core.utils.pandas_grouping import distinct_rows
 
-from tmlt.analytics._schema import ColumnDescriptor
+from tmlt.analytics._backends import SPARK, Backend
+from tmlt.analytics._schema import ColumnDescriptor, Schema, analytics_to_pandas_dtypes
 
 from ._base import KeySetOp
+from ._frames import frame_count
 
 
 @dataclass(frozen=True)
@@ -74,15 +78,54 @@ class Union(KeySetOp):
             for c in left_schema
         }
 
-    def dataframe(self) -> DataFrame:
+    def children(self) -> tuple[KeySetOp, ...]:
+        """The operations whose outputs this one is computed from."""
+        return (self.left, self.right)
+
+    def with_children(self, children: tuple[KeySetOp, ...]) -> KeySetOp:
+        """This union over the given left and right operations."""
+        left, right = children
+        return replace(self, left=left, right=right)
+
+    def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.
 
         This operation may be computationally expensive, even though the full
         dataframe is not evaluated until it is used elsewhere.
         """
-        left_df = self.left.dataframe()
-        right_df = self.right.dataframe()
+        left_df = self.left._spark_dataframe()
+        right_df = self.right._spark_dataframe()
         return left_df.unionByName(right_df).distinct()
+
+    def _pandas_dataframe(self) -> pd.DataFrame:
+        """Generate the pandas dataframe corresponding to this operation.
+
+        The two operands are concatenated one column at a time, each side cast
+        to the union's dtype for that column first. Concatenating the frames
+        whole would let pandas resolve any dtype disagreement itself, and its
+        resolution of an object column against a numeric one is an object column
+        of NaNs -- which is a different row from an object column of ``None``
+        under the null-safe deduplication that follows, and a different row from
+        what Spark's ``unionByName`` produces.
+        """
+        schema = self.schema()
+        columns = list(schema)
+        if not columns:
+            return pd.DataFrame()
+
+        dtypes = analytics_to_pandas_dtypes(Schema(schema))
+        operands = [self.left._pandas_dataframe(), self.right._pandas_dataframe()]
+        combined = pd.DataFrame(
+            {
+                column: pd.concat(
+                    [operand[column].astype(dtypes[column]) for operand in operands],
+                    ignore_index=True,
+                )
+                for column in columns
+            },
+            columns=columns,
+        )
+        return distinct_rows(combined)
 
     def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty.
@@ -96,20 +139,20 @@ class Union(KeySetOp):
         return self.left.is_plan() or self.right.is_plan()
 
     @overload
-    def size(self, fast: Literal[True]) -> Optional[int]: ...
+    def size(self, fast: Literal[True], backend: Backend = SPARK) -> Optional[int]: ...
 
     @overload
-    def size(self, fast: Literal[False]) -> int: ...
+    def size(self, fast: Literal[False], backend: Backend = SPARK) -> int: ...
 
     @overload
-    def size(self, fast: bool) -> Optional[int]: ...
+    def size(self, fast: bool, backend: Backend = SPARK) -> Optional[int]: ...
 
-    def size(self, fast):
+    def size(self, fast, backend=SPARK):
         """Determine the size of the KeySet resulting from this operation."""
         # There's no shortcut to get this count due to deduplication
         if fast:
             return None
-        return self.dataframe().count()
+        return frame_count(self.dataframe(backend))
 
     def __str__(self):
         """Human-readable string representation."""

@@ -10,7 +10,6 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Type,
 
 from pyspark.sql import DataFrame
 from tmlt.core.domains.collections import DictDomain, ListDomain
-from tmlt.core.domains.spark_domains import SparkDataFrameDomain, SparkRowDomain
 from tmlt.core.measurements.aggregations import NoiseMechanism
 from tmlt.core.metrics import (
     AddRemoveKeys,
@@ -23,7 +22,6 @@ from tmlt.core.metrics import (
     SymmetricDifference,
 )
 from tmlt.core.transformations.base import Transformation
-from tmlt.core.transformations.converters import HammingDistanceToSymmetricDifference
 from tmlt.core.transformations.dictionary import (
     AugmentDictTransformation,
     CreateDictFromValue,
@@ -31,54 +29,9 @@ from tmlt.core.transformations.dictionary import (
     create_copy_and_transform_value,
 )
 from tmlt.core.transformations.identity import Identity as IdentityTransformation
-from tmlt.core.transformations.spark_transformations.add_remove_keys import (
-    DropInfsValue as DropInfsValueTransformation,
-    DropNaNsValue as DropNaNsValueTransformation,
-    DropNullsValue as DropNullsValueTransformation,
-    FilterValue as FilterValueTransformation,
-    FlatMapByKeyValue as FlatMapByKeyValueTransformation,
-    FlatMapValue as FlatMapValueTransformation,
-    MapValue as MapValueTransformation,
-    PublicJoinValue as PublicJoinValueTransformation,
-    RenameValue as RenameValueTransformation,
-    ReplaceInfsValue as ReplaceInfsValueTransformation,
-    ReplaceNaNsValue as ReplaceNaNsValueTransformation,
-    ReplaceNullsValue as ReplaceNullsValueTransformation,
-    SelectValue as SelectValueTransformation,
-)
-from tmlt.core.transformations.spark_transformations.filter import (
-    Filter as FilterTransformation,
-)
-from tmlt.core.transformations.spark_transformations.join import (
-    PrivateJoin as PrivateJoinTransformation,
-    PrivateJoinOnKey as PrivateJoinOnKeyTransformation,
-    PublicJoin as PublicJoinTransformation,
-    TruncationStrategy as CoreTruncationStrategy,
-)
-from tmlt.core.transformations.spark_transformations.map import (
-    FlatMap as FlatMapTransformation,
-    GroupingFlatMap,
-    Map as MapTransformation,
-    RowsToRowsTransformation,
-    RowToRowsTransformation,
-    RowToRowTransformation,
-)
-from tmlt.core.transformations.spark_transformations.nan import (
-    DropInfs as DropInfTransformation,
-    DropNaNs as DropNaNsTransformation,
-    DropNulls as DropNullsTransformation,
-    ReplaceInfs as ReplaceInfsTransformation,
-    ReplaceNaNs as ReplaceNaNsTransformation,
-    ReplaceNulls as ReplaceNullsTransformation,
-)
-from tmlt.core.transformations.spark_transformations.rename import (
-    Rename as RenameTransformation,
-)
-from tmlt.core.transformations.spark_transformations.select import (
-    Select as SelectTransformation,
-)
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._catalog import Catalog
 from tmlt.analytics._query_expr import (
     AnalyticsDefault,
@@ -122,8 +75,6 @@ from tmlt.analytics._schema import (
     ColumnDescriptor,
     ColumnType,
     Schema,
-    analytics_to_spark_columns_descriptor,
-    spark_dataframe_domain_to_analytics_columns,
     spark_schema_to_analytics_columns,
 )
 from tmlt.analytics._table_identifier import NamedTable, TemporaryTable
@@ -155,6 +106,8 @@ class BaseTransformationVisitor(QueryExprVisitor):
         input_metric: DictMetric,
         mechanism: NoiseMechanism,
         catalog: Catalog,
+        *,
+        backend: Backend = SPARK,
     ):
         """Constructor for a TransformationVisitor.
 
@@ -163,11 +116,13 @@ class BaseTransformationVisitor(QueryExprVisitor):
             input_metric: The input metric that the transformation should have.
             mechanism: The noise mechanism (only used for FlatMaps).
             catalog: The catalog, used for JoinPublic queries.
+            backend: The backend whose transformations to build the query from.
         """
         self.input_domain = input_domain
         self.input_metric = input_metric
         self.mechanism = mechanism
         self.catalog = catalog
+        self.backend = backend
 
     def _new_visitor_after_transformation(self, transformation: Transformation):
         """Return a new visitor that is expecting queries that follow `transformation`.
@@ -189,6 +144,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
             transformation.output_metric,
             self.mechanism,
             self.catalog,
+            backend=self.backend,
         )
 
     def validate_transformation(
@@ -200,9 +156,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
     ):
         """Ensure that a query's transformation is valid on a given catalog."""
         expected_schema = query.schema(catalog)
-        expected_output_domain = SparkDataFrameDomain(
-            analytics_to_spark_columns_descriptor(expected_schema)
-        )
+        expected_output_domain = self.backend.dataframe_domain(expected_schema)
 
         expected_output_metric: Metric
         if (
@@ -265,13 +219,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         transformation, reference, constraints = child.accept(self)
         if not isinstance(transformation, Transformation):
             raise AnalyticsInternalError("Child query did not create a transformation.")
-        input_domain = lookup_domain(transformation.output_domain, reference)
+        self.backend.table_domain(
+            lookup_domain(transformation.output_domain, reference),
+            "the child query's output domain",
+        )
         input_metric = lookup_metric(transformation.output_metric, reference)
-        if not isinstance(input_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                "Child query has an invalid output domain. "
-                f"Expected SparkDataFrameDomain, got {type(input_domain)}."
-            )
         if not isinstance(
             input_metric, (IfGroupedBy, SymmetricDifference, HammingDistance)
         ):
@@ -282,9 +234,8 @@ class BaseTransformationVisitor(QueryExprVisitor):
             )
         return self.Output(transformation, reference, constraints)
 
-    @classmethod
     def _ensure_not_hamming(
-        cls,
+        self,
         transformation: Transformation,
         reference: TableReference,
         constraints: List[Constraint],
@@ -293,21 +244,20 @@ class BaseTransformationVisitor(QueryExprVisitor):
         input_domain = lookup_domain(transformation.output_domain, reference)
         input_metric = lookup_metric(transformation.output_metric, reference)
         if not isinstance(input_metric, HammingDistance):
-            return cls.Output(transformation, reference, constraints)
+            return self.Output(transformation, reference, constraints)
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            if not isinstance(input_domain, SparkDataFrameDomain):
-                raise AnalyticsInternalError(
-                    "Cannot convert this transformation to one with a "
-                    "SymmetricDifference output metric. "
-                    f"Expected SparkDataFrameDomain, got {type(input_domain)}."
-                )
+            self.backend.table_domain(
+                input_domain, "the domain being converted to SymmetricDifference"
+            )
             return create_copy_and_transform_value(
                 parent_domain,
                 parent_metric,
                 reference.identifier,
                 target,
-                HammingDistanceToSymmetricDifference(input_domain),
+                self.backend.require("HammingDistanceToSymmetricDifference")(
+                    input_domain
+                ),
                 lambda *args: None,
             )
 
@@ -315,7 +265,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
             DictMetric: gen_transformation_dictmetric
         }
 
-        return cls.Output(
+        return self.Output(
             *generate_nested_transformation(
                 transformation, reference.parent, transformation_generator
             ),
@@ -352,12 +302,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = expr.child.accept(self)
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+            input_domain = self.backend.table_domain(
+                lookup_domain(child_transformation.output_domain, child_ref),
+                "the child query's output domain",
+            )
             input_metric = lookup_metric(child_transformation.output_metric, child_ref)
-            if not isinstance(input_domain, SparkDataFrameDomain):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
             if not isinstance(input_metric, (SymmetricDifference, IfGroupedBy)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -372,14 +321,14 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 parent_metric,
                 child_ref.identifier,
                 target,
-                RenameTransformation(
+                self.backend.require("Rename")(
                     input_domain, input_metric, dict(expr.column_mapper)
                 ),
                 lambda *args: None,
             )
 
         def gen_transformation_ark(parent_domain, parent_metric, target):
-            return RenameValueTransformation(
+            return self.backend.require("RenameValue")(
                 parent_domain,
                 parent_metric,
                 child_ref.identifier,
@@ -404,12 +353,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = expr.child.accept(self)
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+            input_domain = self.backend.table_domain(
+                lookup_domain(child_transformation.output_domain, child_ref),
+                "the child query's output domain",
+            )
             input_metric = lookup_metric(child_transformation.output_metric, child_ref)
-            if not isinstance(input_domain, SparkDataFrameDomain):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
             if not isinstance(input_metric, (IfGroupedBy, SymmetricDifference)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -419,12 +367,14 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 parent_metric,
                 child_ref.identifier,
                 target,
-                FilterTransformation(input_domain, input_metric, expr.condition),
+                self.backend.require("Filter")(
+                    input_domain, input_metric, expr.condition
+                ),
                 lambda *args: None,
             )
 
         def gen_transformation_ark(parent_domain, parent_metric, target):
-            return FilterValueTransformation(
+            return self.backend.require("FilterValue")(
                 parent_domain,
                 parent_metric,
                 child_ref.identifier,
@@ -449,13 +399,12 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = expr.child.accept(self)
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+            input_domain = self.backend.table_domain(
+                lookup_domain(child_transformation.output_domain, child_ref),
+                "the child query's output domain",
+            )
             input_metric = lookup_metric(child_transformation.output_metric, child_ref)
 
-            if not isinstance(input_domain, SparkDataFrameDomain):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
             if not isinstance(
                 input_metric, (IfGroupedBy, SymmetricDifference, HammingDistance)
             ):
@@ -472,12 +421,14 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 parent_metric,
                 child_ref.identifier,
                 target,
-                SelectTransformation(input_domain, input_metric, list(expr.columns)),
+                self.backend.require("Select")(
+                    input_domain, input_metric, list(expr.columns)
+                ),
                 lambda *args: None,
             )
 
         def gen_transformation_ark(parent_domain, parent_metric, target):
-            return SelectValueTransformation(
+            return self.backend.require("SelectValue")(
                 parent_domain,
                 parent_metric,
                 child_ref.identifier,
@@ -501,35 +452,31 @@ class BaseTransformationVisitor(QueryExprVisitor):
         """Create a transformation from a Map query expression."""
         child_transformation, child_ref, child_constraints = expr.child.accept(self)
 
-        input_domain = lookup_domain(child_transformation.output_domain, child_ref)
-        if not isinstance(input_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(input_domain)}."
-            )
-        transformer_input_domain = SparkRowDomain(input_domain.schema)
+        input_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
+        transformer_input_domain = self.backend.row_domain_type(input_domain.schema)
         # Any new column created by Map could contain a null value
-        spark_columns_descriptor = {
-            # all of the Spark<Type>ColumnDescriptor classes are dataclasses,
-            # but the SparkColumnDescriptor base class isn't;
-            # hence the "type: ignore" here
-            k: dataclasses.replace(v, allow_null=True)  # type: ignore
-            for k, v in analytics_to_spark_columns_descriptor(
-                expr.schema_new_columns
-            ).items()
+        new_columns_descriptor = {
+            # Every concrete column descriptor is a dataclass, though the
+            # base class the backend types them by is not.
+            k: dataclasses.replace(v, allow_null=True)
+            for k, v in self.backend.columns_descriptor(expr.schema_new_columns).items()
         }
 
         if expr.augment:
             output_schema = {
                 **transformer_input_domain.schema,
-                **spark_columns_descriptor,
+                **new_columns_descriptor,
             }
         else:
-            output_schema = spark_columns_descriptor
+            output_schema = new_columns_descriptor
 
-        output_domain = SparkRowDomain(output_schema)
+        output_domain = self.backend.row_domain_type(output_schema)
         # If you change `getattr(query, "f")` below to `query.f`,
         # mypy will be upset
-        transformer = RowToRowTransformation(
+        transformer = self.backend.require("RowToRowTransformation")(
             input_domain=transformer_input_domain,
             output_domain=output_domain,
             trusted_f=getattr(expr, "f"),
@@ -550,7 +497,9 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 parent_metric,
                 child_ref.identifier,
                 target,
-                MapTransformation(metric=input_metric, row_transformer=transformer),
+                self.backend.require("Map")(
+                    metric=input_metric, row_transformer=transformer
+                ),
                 lambda *args: None,
             )
 
@@ -560,7 +509,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                     "Maps on tables with the AddRowsWithID protected change "
                     "must be augmenting"
                 )
-            return MapValueTransformation(
+            return self.backend.require("MapValue")(
                 parent_domain,
                 parent_metric,
                 child_ref.identifier,
@@ -583,11 +532,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
     def build_flat_map(
         self,
         input_metric: Union[IfGroupedBy, SymmetricDifference],
-        row_transformer: RowToRowsTransformation,
+        row_transformer: Transformation,
         max_rows: Optional[int],
     ) -> Transformation:
         """Build a Transformation for a FlatMap query expression with grouping=False."""
-        transformation = FlatMapTransformation(
+        transformation = self.backend.require("FlatMap")(
             metric=input_metric,
             row_transformer=row_transformer,
             max_num_rows=max_rows,
@@ -597,11 +546,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
     def build_grouping_flat_map(
         self,
         inner_metric: Union[SumOf, RootSumOfSquared],
-        row_transformer: RowToRowsTransformation,
+        row_transformer: Transformation,
         max_rows: int,
     ) -> Transformation:
         """Build a Transformation for a FlatMap query expression with grouping=True."""
-        transformation = GroupingFlatMap(
+        transformation = self.backend.require("GroupingFlatMap")(
             output_metric=inner_metric,
             row_transformer=row_transformer,
             max_num_rows=max_rows,
@@ -617,34 +566,30 @@ class BaseTransformationVisitor(QueryExprVisitor):
             *expr.child.accept(self)
         )
 
-        input_domain = lookup_domain(child_transformation.output_domain, child_ref)
-        if not isinstance(input_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(input_domain)}."
-            )
-        transformer_input_domain = SparkRowDomain(input_domain.schema)
+        input_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
+        transformer_input_domain = self.backend.row_domain_type(input_domain.schema)
         # Any new column created by FlatMap could contain a null value
-        spark_columns_descriptor = {
-            # all of the Spark<Type>ColumnDescriptor classes are dataclasses,
-            # but the SparkColumnDescriptor base class isn't;
-            # hence the "type: ignore" here
-            k: dataclasses.replace(v, allow_null=True)  # type: ignore
-            for k, v in analytics_to_spark_columns_descriptor(
-                expr.schema_new_columns
-            ).items()
+        new_columns_descriptor = {
+            # Every concrete column descriptor is a dataclass, though the
+            # base class the backend types them by is not.
+            k: dataclasses.replace(v, allow_null=True)
+            for k, v in self.backend.columns_descriptor(expr.schema_new_columns).items()
         }
 
         if expr.augment:
             output_schema = {
                 **transformer_input_domain.schema,
-                **spark_columns_descriptor,
+                **new_columns_descriptor,
             }
         else:
-            output_schema = spark_columns_descriptor
+            output_schema = new_columns_descriptor
 
-        output_domain = ListDomain(SparkRowDomain(output_schema))
+        output_domain = ListDomain(self.backend.row_domain_type(output_schema))
 
-        row_transformer = RowToRowsTransformation(
+        row_transformer = self.backend.require("RowToRowsTransformation")(
             input_domain=transformer_input_domain,
             output_domain=output_domain,
             trusted_f=getattr(expr, "f"),
@@ -702,7 +647,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                     "ProtectedChange(), the max_rows parameter "
                     "is not required and will be ignored."
                 )
-            return FlatMapValueTransformation(
+            return self.backend.require("FlatMapValue")(
                 parent_domain,
                 parent_metric,
                 child_ref.identifier,
@@ -729,32 +674,32 @@ class BaseTransformationVisitor(QueryExprVisitor):
             *expr.child.accept(self)
         )
 
-        input_domain = lookup_domain(child_transformation.output_domain, child_ref)
-        if not isinstance(input_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(input_domain)}."
-            )
-        transformer_input_domain = ListDomain(SparkRowDomain(input_domain.schema))
+        input_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
+        transformer_input_domain = ListDomain(
+            self.backend.row_domain_type(input_domain.schema)
+        )
 
         # Any new column created by FlatMap could contain a null value
         new_columns_descriptor = {
-            # all of the Spark<Type>ColumnDescriptor classes are dataclasses,
-            # but the SparkColumnDescriptor base class isn't;
-            # hence the "type: ignore" here
-            k: dataclasses.replace(v, allow_null=True)  # type: ignore
-            for k, v in analytics_to_spark_columns_descriptor(
-                expr.schema_new_columns
-            ).items()
+            # Every concrete column descriptor is a dataclass, though the
+            # base class the backend types them by is not.
+            k: dataclasses.replace(v, allow_null=True)
+            for k, v in self.backend.columns_descriptor(expr.schema_new_columns).items()
         }
 
         def gen_transformation_ark(parent_domain, parent_metric, target):
-            output_domain = ListDomain(SparkRowDomain(new_columns_descriptor))
-            row_transformer = RowsToRowsTransformation(
+            output_domain = ListDomain(
+                self.backend.row_domain_type(new_columns_descriptor)
+            )
+            row_transformer = self.backend.require("RowsToRowsTransformation")(
                 input_domain=transformer_input_domain,
                 output_domain=output_domain,
                 trusted_f=getattr(expr, "f"),
             )
-            return FlatMapByKeyValueTransformation(
+            return self.backend.require("FlatMapByKeyValue")(
                 parent_domain,
                 parent_metric,
                 child_ref.identifier,
@@ -780,15 +725,16 @@ class BaseTransformationVisitor(QueryExprVisitor):
         input_domain: DictDomain,
         left_key: Any,
         right_key: Any,
-        left_truncation_strategy: CoreTruncationStrategy,
-        right_truncation_strategy: CoreTruncationStrategy,
+        # The backend's own TruncationStrategy enum; see Ops.TruncationStrategy.
+        left_truncation_strategy: Any,
+        right_truncation_strategy: Any,
         left_truncation_threshold: int,
         right_truncation_threshold: int,
         join_cols: Union[List[str], None] = None,
         join_on_nulls: bool = False,
     ) -> Transformation:
         """Build a Transformation for a private join."""
-        return PrivateJoinTransformation(
+        return self.backend.require("PrivateJoin")(
             input_domain=input_domain,
             left_key=left_key,
             right_key=right_key,
@@ -818,24 +764,26 @@ class BaseTransformationVisitor(QueryExprVisitor):
             )
 
         child_transformation = left_transformation | right_transformation
-        left_domain = lookup_domain(child_transformation.output_domain, left_ref)
-        right_domain = lookup_domain(child_transformation.output_domain, right_ref)
-        if not isinstance(left_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(left_domain)}."
-            )
-        if not isinstance(right_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(right_domain)}."
-            )
+        left_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, left_ref),
+            "the left table's domain",
+        )
+        right_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, right_ref),
+            "the right table's domain",
+        )
+
+        # An enum rather than something to construct, so it is read for its
+        # members rather than called.
+        core_truncation_strategy: Any = self.backend.require("TruncationStrategy")
 
         def get_truncation_params(
             strategy: TruncationStrategy.Type,
-        ) -> Tuple[CoreTruncationStrategy, int]:
+        ) -> Tuple[Any, int]:
             if isinstance(strategy, TruncationStrategy.DropExcess):
-                return CoreTruncationStrategy.TRUNCATE, strategy.max_rows
+                return core_truncation_strategy.TRUNCATE, strategy.max_rows
             elif isinstance(strategy, TruncationStrategy.DropNonUnique):
-                return CoreTruncationStrategy.DROP, 1
+                return core_truncation_strategy.DROP, 1
             else:
                 raise ValueError(
                     f"Truncation strategy type {strategy.__class__.__qualname__} "
@@ -889,7 +837,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                     "When joining with IDs, truncation strategies are not required."
                     " Provided truncation parameters will be ignored."
                 )
-            return PrivateJoinOnKeyTransformation(
+            return self.backend.require("PrivateJoinOnKey")(
                 parent_domain,
                 parent_metric,
                 left_ref.identifier,
@@ -941,12 +889,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         public_df_schema = Schema(spark_schema_to_analytics_columns(public_df.schema))
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+            input_domain = self.backend.table_domain(
+                lookup_domain(child_transformation.output_domain, child_ref),
+                "the child query's output domain",
+            )
             input_metric = lookup_metric(child_transformation.output_metric, child_ref)
-            if not isinstance(input_domain, SparkDataFrameDomain):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
             if not isinstance(input_metric, (IfGroupedBy, SymmetricDifference)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -957,12 +904,12 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 parent_metric,
                 child_ref.identifier,
                 target,
-                PublicJoinTransformation(
-                    input_domain=SparkDataFrameDomain(input_domain.schema),
-                    public_df=public_df,
-                    public_df_domain=SparkDataFrameDomain(
-                        analytics_to_spark_columns_descriptor(public_df_schema)
+                self.backend.require("PublicJoin")(
+                    input_domain=self.backend.dataframe_domain_type(
+                        input_domain.schema
                     ),
+                    public_df=public_df,
+                    public_df_domain=self.backend.dataframe_domain(public_df_schema),
                     join_cols=list(expr.join_columns) if expr.join_columns else None,
                     metric=input_metric,
                     join_on_nulls=True,
@@ -972,24 +919,21 @@ class BaseTransformationVisitor(QueryExprVisitor):
             )
 
         def gen_transformation_ark(parent_domain, parent_metric, target):
-            return PublicJoinValueTransformation(
+            return self.backend.require("PublicJoinValue")(
                 parent_domain,
                 parent_metric,
                 child_ref.identifier,
                 target,
                 public_df,
-                SparkDataFrameDomain(
-                    analytics_to_spark_columns_descriptor(public_df_schema)
-                ),
+                self.backend.dataframe_domain(public_df_schema),
                 list(expr.join_columns) if expr.join_columns else None,
                 join_on_nulls=True,
             )
 
-        child_domain = lookup_domain(child_transformation.output_domain, child_ref)
-        if not isinstance(child_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(child_domain)}."
-            )
+        child_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
 
         common_cols = set(child_domain.schema) & set(public_df_schema)
         join_cols = set(expr.join_columns or common_cols)
@@ -1063,12 +1007,11 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = self._visit_child(
             expr.child
         )
-        input_domain = lookup_domain(child_transformation.output_domain, child_ref)
+        input_domain = self.backend.table_domain(
+            lookup_domain(child_transformation.output_domain, child_ref),
+            "the child query's output domain",
+        )
         input_metric = lookup_metric(child_transformation.output_metric, child_ref)
-        if not isinstance(input_domain, SparkDataFrameDomain):
-            raise AnalyticsInternalError(
-                f"Unrecognized input domain {type(input_domain)}."
-            )
         if not isinstance(
             input_metric, (IfGroupedBy, HammingDistance, SymmetricDifference)
         ):
@@ -1088,7 +1031,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                     f" {grouping_column}, because it is being used as a"
                     " grouping column"
                 )
-        analytics_schema = spark_dataframe_domain_to_analytics_columns(input_domain)
+        analytics_schema = self.backend.domain_to_analytics_columns(input_domain)
 
         replace_with = self._get_replace_with(expr, analytics_schema, grouping_column)
 
@@ -1120,28 +1063,22 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 input_metric, input_domain
             )
             if replace_null:
-                if not isinstance(input_domain, SparkDataFrameDomain):
-                    raise AnalyticsInternalError(
-                        f"Expected input domain {type(input_domain)}, got"
-                        f" {type(input_domain)} instead."
-                    )
                 if not isinstance(
                     input_metric, (IfGroupedBy, HammingDistance, SymmetricDifference)
                 ):
                     raise AnalyticsInternalError(
                         f"Unrecognized input metric {type(input_metric)}."
                     )
-                transformation |= ReplaceNullsTransformation(
+                transformation |= self.backend.require("ReplaceNulls")(
                     input_domain=input_domain,
                     metric=input_metric,
                     replace_map=null_replace_map,
                 )
             if replace_nan:
-                if not isinstance(transformation.output_domain, SparkDataFrameDomain):
-                    raise AnalyticsInternalError(
-                        f"Expected output domain {SparkDataFrameDomain}, got"
-                        f" {type(transformation.output_domain)} instead."
-                    )
+                self.backend.table_domain(
+                    transformation.output_domain,
+                    "the null replacement's output domain",
+                )
                 if not isinstance(
                     transformation.output_metric,
                     (IfGroupedBy, HammingDistance, SymmetricDifference),
@@ -1150,7 +1087,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                         f"Expected output metric {IfGroupedBy}, got"
                         f" {type(transformation.output_metric)} instead."
                     )
-                transformation |= ReplaceNaNsTransformation(
+                transformation |= self.backend.require("ReplaceNaNs")(
                     input_domain=transformation.output_domain,
                     metric=transformation.output_metric,
                     replace_map=nan_replace_map,
@@ -1172,7 +1109,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
             temp_table_id = TemporaryTable()
 
             if replace_null:
-                transformation |= ReplaceNullsValueTransformation(
+                transformation |= self.backend.require("ReplaceNullsValue")(
                     parent_domain,
                     parent_metric,
                     child_ref.identifier,
@@ -1191,7 +1128,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                         f"Expected output metric {AddRemoveKeys}, got"
                         f" {type(transformation.output_metric)} instead."
                     )
-                transformation |= ReplaceNaNsValueTransformation(
+                transformation |= self.backend.require("ReplaceNaNsValue")(
                     transformation.output_domain,
                     transformation.output_metric,
                     temp_table_id if replace_null else child_ref.identifier,
@@ -1211,7 +1148,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                         f"Expected output metric {AddRemoveKeys}, got"
                         f" {type(transformation.output_metric)} instead."
                     )
-                transformation |= RenameValueTransformation(
+                transformation |= self.backend.require("RenameValue")(
                     transformation.output_domain,
                     transformation.output_metric,
                     child_ref.identifier,
@@ -1241,7 +1178,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
         input_metric = lookup_metric(child_transformation.output_metric, child_ref)
 
         analytics_schema = Schema(
-            spark_dataframe_domain_to_analytics_columns(input_domain)
+            self.backend.domain_to_analytics_columns(input_domain)
         )
         replace_with = dict(expr.replace_with)
         if len(replace_with) == 0:
@@ -1252,10 +1189,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
             }
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            if not isinstance(input_domain, SparkDataFrameDomain):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
+            self.backend.table_domain(input_domain, "the child query's output domain")
             if not isinstance(
                 input_metric, (IfGroupedBy, HammingDistance, SymmetricDifference)
             ):
@@ -1267,7 +1201,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 parent_metric,
                 child_ref.identifier,
                 target,
-                ReplaceInfsTransformation(
+                self.backend.require("ReplaceInfs")(
                     input_domain=input_domain,
                     metric=input_metric,
                     replace_map=replace_with,
@@ -1276,7 +1210,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
             )
 
         def gen_transformation_ark(parent_domain, parent_metric, target):
-            return ReplaceInfsValueTransformation(
+            return self.backend.require("ReplaceInfsValue")(
                 parent_domain,
                 parent_metric,
                 child_ref.identifier,
@@ -1304,7 +1238,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
         input_domain = lookup_domain(child_transformation.output_domain, child_ref)
         input_metric = lookup_metric(child_transformation.output_metric, child_ref)
         analytics_schema = Schema(
-            spark_dataframe_domain_to_analytics_columns(input_domain)
+            self.backend.domain_to_analytics_columns(input_domain)
         )
 
         columns = expr.columns
@@ -1323,10 +1257,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                     )
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            if not isinstance(input_domain, SparkDataFrameDomain):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
+            self.backend.table_domain(input_domain, "the child query's output domain")
             if not isinstance(input_metric, (IfGroupedBy, SymmetricDifference)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -1336,7 +1267,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                 parent_metric,
                 child_ref.identifier,
                 target,
-                DropInfTransformation(
+                self.backend.require("DropInfs")(
                     input_domain=input_domain,
                     metric=input_metric,
                     columns=list(columns),
@@ -1345,7 +1276,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
             )
 
         def gen_transformation_ark(parent_domain, parent_metric, target):
-            return DropInfsValueTransformation(
+            return self.backend.require("DropInfsValue")(
                 parent_domain,
                 parent_metric,
                 child_ref.identifier,
@@ -1373,7 +1304,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
         input_domain = lookup_domain(child_transformation.output_domain, child_ref)
         input_metric = lookup_metric(child_transformation.output_metric, child_ref)
         analytics_schema = Schema(
-            spark_dataframe_domain_to_analytics_columns(input_domain)
+            self.backend.domain_to_analytics_columns(input_domain)
         )
 
         # TODO(2702): This should be supported for IDs tables
@@ -1404,10 +1335,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
         nan_columns = [col for col in columns if analytics_schema[col].allow_nan]
 
         def gen_transformation_dictmetric(parent_domain, parent_metric, target):
-            if not isinstance(input_domain, SparkDataFrameDomain):
-                raise AnalyticsInternalError(
-                    f"Unrecognized input domain {type(input_domain)}."
-                )
+            self.backend.table_domain(input_domain, "the child query's output domain")
             if not isinstance(input_metric, (IfGroupedBy, SymmetricDifference)):
                 raise AnalyticsInternalError(
                     f"Unrecognized input metric {type(input_metric)}."
@@ -1417,16 +1345,14 @@ class BaseTransformationVisitor(QueryExprVisitor):
             )
 
             if null_columns:
-                transformation |= DropNullsTransformation(
+                transformation |= self.backend.require("DropNulls")(
                     input_domain, input_metric, null_columns
                 )
 
             if nan_columns:
-                if not isinstance(transformation.output_domain, SparkDataFrameDomain):
-                    raise AnalyticsInternalError(
-                        f"Expected output domain {SparkDataFrameDomain}, got"
-                        f" {type(transformation.output_domain)} instead."
-                    )
+                self.backend.table_domain(
+                    transformation.output_domain, "the null drop's output domain"
+                )
                 if not isinstance(
                     transformation.output_metric, (IfGroupedBy, SymmetricDifference)
                 ):
@@ -1434,7 +1360,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                         f"Expected output metric {IfGroupedBy}, got"
                         f" {type(transformation.output_metric)} instead."
                     )
-                transformation |= DropNaNsTransformation(
+                transformation |= self.backend.require("DropNaNs")(
                     transformation.output_domain,
                     transformation.output_metric,
                     nan_columns,
@@ -1456,7 +1382,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
             temp_table_id = TemporaryTable()
 
             if null_columns:
-                transformation |= DropNullsValueTransformation(
+                transformation |= self.backend.require("DropNullsValue")(
                     parent_domain,
                     parent_metric,
                     child_ref.identifier,
@@ -1475,7 +1401,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                         f"Expected output metric {AddRemoveKeys}, got"
                         f" {type(transformation.output_metric)} instead."
                     )
-                transformation |= DropNaNsValueTransformation(
+                transformation |= self.backend.require("DropNaNsValue")(
                     transformation.output_domain,
                     transformation.output_metric,
                     temp_table_id if null_columns else child_ref.identifier,
@@ -1495,7 +1421,7 @@ class BaseTransformationVisitor(QueryExprVisitor):
                         f"Expected output metric {AddRemoveKeys}, got"
                         f" {type(transformation.output_metric)} instead."
                     )
-                transformation |= RenameValueTransformation(
+                transformation |= self.backend.require("RenameValue")(
                     transformation.output_domain,
                     transformation.output_metric,
                     child_ref.identifier,
@@ -1527,7 +1453,9 @@ class BaseTransformationVisitor(QueryExprVisitor):
         child_transformation, child_ref, child_constraints = self._visit_child(
             expr.child
         )
-        transformation, ref = expr.constraint._enforce(child_transformation, child_ref)
+        transformation, ref = expr.constraint._enforce(
+            child_transformation, child_ref, backend=self.backend
+        )
 
         return self.Output(
             transformation,

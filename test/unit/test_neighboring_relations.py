@@ -97,7 +97,7 @@ class TestNeighboringRelations:
         # table's value is of wrong type
         with pytest.raises(TypeCheckError):
             AddRemoveRows("table1", n=1).validate_input(
-                {"table1": ["a", "random", "list"]}  # type: ignore
+                {"table1": ["a", "random", "list"]}
             )
 
     def test_add_remove_rows_accept(self):
@@ -140,7 +140,7 @@ class TestNeighboringRelations:
         # table's value is not a DataFrame
         with pytest.raises(TypeCheckError):
             AddRemoveRowsAcrossGroups("table1", "B", 1, 1).validate_input(
-                {"table1": ["a", "random", "list"]}  # type: ignore
+                {"table1": ["a", "random", "list"]}
             )
         # table contains values not supported in grouping operations
         with pytest.raises(ValueError):

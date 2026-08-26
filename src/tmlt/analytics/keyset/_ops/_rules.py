@@ -11,9 +11,6 @@ from tmlt.analytics import AnalyticsInternalError
 
 from ._base import KeySetOp
 from ._cross_join import CrossJoin, InMemoryCrossJoin
-from ._detect import Detect
-from ._filter import Filter
-from ._from_dataframe import FromSparkDataFrame
 from ._from_tuples import FromTuples
 from ._join import Join
 from ._project import Project
@@ -38,32 +35,7 @@ def depth_first(func: Callable[[KeySetOp], KeySetOp]) -> Callable[[KeySetOp], Ke
 
     @wraps(func)
     def wrapped(op: KeySetOp) -> KeySetOp:
-        if isinstance(op, (Detect, FromTuples, FromSparkDataFrame)):
-            return func(op)
-        elif isinstance(op, CrossJoin):
-            return func(type(op)(tuple(wrapped(f) for f in op.factors)))
-        elif isinstance(op, Join):
-            left = wrapped(op.left)
-            right = wrapped(op.right)
-            return func(Join(left, right))
-        elif isinstance(op, Project):
-            child = wrapped(op.child)
-            return func(Project(child, op.projected_columns))
-        elif isinstance(op, Filter):
-            child = wrapped(op.child)
-            return func(Filter(child, op.condition))
-        elif isinstance(op, Subtract):
-            left = wrapped(op.left)
-            right = wrapped(op.right)
-            return func(Subtract(left, right))
-        elif isinstance(op, Union):
-            left = wrapped(op.left)
-            right = wrapped(op.right)
-            return func(Union(left, right))
-        else:
-            raise AnalyticsInternalError(
-                f"Unhandled KeySetOp subtype {type(op).__qualname__} encountered."
-            )
+        return func(op.with_children(tuple(wrapped(c) for c in op.children())))
 
     return wrapped
 
@@ -87,25 +59,7 @@ def breadth_first(
         new_op = func(op)
         if new_op != op:
             return wrapped(new_op)
-
-        if isinstance(new_op, (Detect, FromTuples, FromSparkDataFrame)):
-            return new_op
-        elif isinstance(new_op, CrossJoin):
-            return type(new_op)(tuple(wrapped(f) for f in new_op.factors))
-        elif isinstance(new_op, Join):
-            return Join(wrapped(new_op.left), wrapped(new_op.right))
-        elif isinstance(new_op, Project):
-            return Project(wrapped(new_op.child), new_op.projected_columns)
-        elif isinstance(new_op, Filter):
-            return Filter(wrapped(new_op.child), new_op.condition)
-        elif isinstance(new_op, Subtract):
-            return Subtract(wrapped(new_op.left), wrapped(new_op.right))
-        elif isinstance(new_op, Union):
-            return Union(wrapped(new_op.left), wrapped(new_op.right))
-        else:
-            raise AnalyticsInternalError(
-                f"Unhandled KeySetOp subtype {type(new_op).__qualname__} encountered."
-            )
+        return new_op.with_children(tuple(wrapped(c) for c in new_op.children()))
 
     return wrapped
 

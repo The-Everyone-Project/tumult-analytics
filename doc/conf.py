@@ -54,7 +54,16 @@ linkcheck_ignore = [
 
 ### Sphinx configuration
 
+# NOTE (The-Everyone-Project fork): doc/_ext holds this repository's own Sphinx
+# extensions, which are named as modules below and so have to be importable.
+sys.path.insert(0, str(Path(__file__).parent / "_ext"))
+
 extensions = [
+    # NOTE (The-Everyone-Project fork): renders the backend feature matrix from
+    # the tables the compiler's rejection gate reads, so that the page every
+    # "not supported by this backend" message points at cannot go stale. See
+    # doc/_ext/backend_matrix.py.
+    "backend_matrix",
     "sphinxcontrib.images",
     "sphinx_copybutton",
     "sphinx_design",

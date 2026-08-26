@@ -24,6 +24,8 @@ from typing import (
     cast,
 )
 
+import numpy as np
+import pandas as pd
 from pyspark.sql.types import (
     DataType,
     DateType,
@@ -37,6 +39,16 @@ from pyspark.sql.types import (
     TimestampType,
 )
 from tmlt.core.domains.base import Domain
+from tmlt.core.domains.pandas_domains import (
+    PandasColumnDescriptor,
+    PandasDateColumnDescriptor,
+    PandasDtype,
+    PandasFloatColumnDescriptor,
+    PandasIntegerColumnDescriptor,
+    PandasStringColumnDescriptor,
+    PandasTableDomain,
+    PandasTimestampColumnDescriptor,
+)
 from tmlt.core.domains.spark_domains import (
     SparkColumnDescriptor,
     SparkColumnsDescriptor,
@@ -48,6 +60,11 @@ from tmlt.core.domains.spark_domains import (
     SparkTimestampColumnDescriptor,
 )
 from typeguard import check_type, typechecked
+
+from tmlt.analytics._coerce_pandas_schema import (
+    object_column_element_type,
+    string_dtypes,
+)
 
 
 class keyValuePair(NamedTuple):
@@ -396,6 +413,71 @@ _ANALYTICS_TYPE_TO_COLUMN_DESCRIPTOR = {
 More information regarding Spark columns descriptor can be found in
 :class:`~tmlt.core.domains.spark_domains.SparkColumnDescriptor`"""
 
+_PANDAS_TO_ANALYTICS_ELEMENT_TYPE: Dict[type, ColumnType] = {
+    str: ColumnType.VARCHAR,
+    datetime.date: ColumnType.DATE,
+}
+"""Mapping from the element type of an ``object`` column to its Analytics type.
+
+The keys are what :func:`~tmlt.analytics._coerce_pandas_schema.object_column_element_type`
+returns."""
+
+_PANDAS_DTYPE_TO_ANALYTICS: Dict[PandasDtype, ColumnType] = {
+    np.dtype("int8"): ColumnType.INTEGER,
+    np.dtype("int16"): ColumnType.INTEGER,
+    np.dtype("int32"): ColumnType.INTEGER,
+    np.dtype("int64"): ColumnType.INTEGER,
+    np.dtype("uint8"): ColumnType.INTEGER,
+    np.dtype("uint16"): ColumnType.INTEGER,
+    np.dtype("uint32"): ColumnType.INTEGER,
+    pd.Int8Dtype(): ColumnType.INTEGER,
+    pd.Int16Dtype(): ColumnType.INTEGER,
+    pd.Int32Dtype(): ColumnType.INTEGER,
+    pd.Int64Dtype(): ColumnType.INTEGER,
+    np.dtype("float32"): ColumnType.DECIMAL,
+    np.dtype("float64"): ColumnType.DECIMAL,
+    pd.Float32Dtype(): ColumnType.DECIMAL,
+    pd.Float64Dtype(): ColumnType.DECIMAL,
+    **{dtype: ColumnType.VARCHAR for dtype in string_dtypes()},
+    **{
+        dtype: ColumnType.TIMESTAMP
+        for dtype in PandasTimestampColumnDescriptor().accepted_dtypes
+    },
+}
+"""Mapping from pandas dtype to supported Analytics column types.
+
+Like :data:`_SPARK_TO_ANALYTICS`, this covers the dtypes that
+:func:`~tmlt.analytics._coerce_pandas_schema.coerce_pandas_schema_or_fail`
+accepts, not only the ones it produces, so that it can be applied to an
+uncoerced DataFrame.
+
+The ``object`` dtype is deliberately absent: it may be either a ``VARCHAR`` or a
+``DATE`` column, and only its values say which. See
+:func:`~tmlt.analytics._coerce_pandas_schema.object_column_element_type`."""
+
+_ANALYTICS_TYPE_TO_PANDAS_COLUMN_DESCRIPTOR: Dict[ColumnType, type] = {
+    ColumnType.INTEGER: PandasIntegerColumnDescriptor,
+    ColumnType.DECIMAL: PandasFloatColumnDescriptor,
+    ColumnType.VARCHAR: PandasStringColumnDescriptor,
+    ColumnType.DATE: PandasDateColumnDescriptor,
+    ColumnType.TIMESTAMP: PandasTimestampColumnDescriptor,
+}
+"""Mapping from Analytics column types to pandas columns descriptor.
+
+More information regarding pandas columns descriptor can be found in
+:class:`~tmlt.core.domains.pandas_domains.PandasColumnDescriptor`"""
+
+_PANDAS_COLUMN_DESCRIPTOR_TO_ANALYTICS: Dict[type, ColumnType] = {
+    descriptor: column_type
+    for column_type, descriptor in _ANALYTICS_TYPE_TO_PANDAS_COLUMN_DESCRIPTOR.items()
+}
+"""Mapping from pandas columns descriptor to Analytics column types.
+
+Derived from :data:`_ANALYTICS_TYPE_TO_PANDAS_COLUMN_DESCRIPTOR` rather than
+written out, so that the two cannot come to disagree. It is keyed by descriptor
+class rather than by dtype, as the Spark family is, because the string and date
+descriptors both describe an ``object`` column."""
+
 
 def column_type_to_py_type(column_type: ColumnType) -> type:
     """Converts a ColumnType to a python type."""
@@ -478,6 +560,156 @@ def spark_dataframe_domain_to_analytics_columns(
         else:
             column_descs[column_name] = ColumnDescriptor(
                 column_type=_SPARK_TO_ANALYTICS[descriptor.data_type],
+                allow_null=descriptor.allow_null,
+            )
+    return column_descs
+
+
+def analytics_to_pandas_columns_descriptor(
+    analytics_schema: Schema,
+) -> Dict[str, PandasColumnDescriptor]:
+    """Convert a schema in Analytics representation to a pandas columns descriptor.
+
+    This is the pandas counterpart of
+    :func:`analytics_to_spark_columns_descriptor`, and describes the same values:
+    for every column, ``descriptor.to_spark_descriptor()`` equals what that
+    function produces for it.
+    """
+    out: Dict[str, PandasColumnDescriptor] = {}
+    for column_name, column_desc in analytics_schema.column_descs.items():
+        if column_desc.column_type == ColumnType.DECIMAL:
+            out[column_name] = PandasFloatColumnDescriptor(
+                allow_nan=column_desc.allow_nan,
+                allow_inf=column_desc.allow_inf,
+                allow_null=column_desc.allow_null,
+            )
+        else:
+            out[column_name] = _ANALYTICS_TYPE_TO_PANDAS_COLUMN_DESCRIPTOR[
+                ColumnType[column_desc.column_type.name]
+            ](allow_null=column_desc.allow_null)
+    return out
+
+
+def analytics_to_pandas_dtypes(analytics_schema: Schema) -> Dict[str, PandasDtype]:
+    """Convert an Analytics schema to the pandas dtype of each of its columns.
+
+    This is the pandas counterpart of :func:`analytics_to_spark_schema`. The
+    dtype returned for a column is the canonical one for it -- the dtype a
+    DataFrame built to match this schema should use -- which for an integer or
+    a decimal column depends on whether it allows nulls, as only the pandas
+    nullable extension dtypes can hold one. A column may validly have another
+    dtype; see
+    :attr:`~tmlt.core.domains.pandas_domains.PandasColumnDescriptor.accepted_dtypes`.
+
+    Which dtype is canonical is Core's answer, not one restated here: this asks
+    the descriptor :func:`analytics_to_pandas_columns_descriptor` builds, which
+    is the descriptor the domain will validate the column against.
+    """
+    return {
+        column_name: descriptor.pandas_dtype
+        for column_name, descriptor in analytics_to_pandas_columns_descriptor(
+            analytics_schema
+        ).items()
+    }
+
+
+def pandas_dtypes_to_analytics_columns(
+    dataframe: pd.DataFrame,
+) -> Dict[str, ColumnDescriptor]:
+    """Convert the dtypes of a pandas DataFrame to Analytics columns.
+
+    This is the pandas counterpart of :func:`spark_schema_to_analytics_columns`,
+    and takes a DataFrame rather than a schema because pandas has none: an
+    ``object`` column's values are the only thing that says whether it is a
+    ``VARCHAR`` or a ``DATE`` column.
+
+    Only the *types* are inspected, never the values -- apart from the one pass
+    over an ``object`` column that is unavoidable. In particular:
+
+    * ``allow_null`` says whether the dtype **can** represent a null, not
+      whether the column happens to contain one. The nullable extension dtypes,
+      ``object`` and ``datetime64`` can; the numpy integer and float dtypes
+      cannot, and in a numpy float column a NaN is a NaN rather than a null.
+    * ``allow_nan`` and ``allow_inf`` are ``True`` for every ``DECIMAL`` column,
+      as they are in :func:`spark_schema_to_analytics_columns`, which has no
+      information about them at all. Scanning for them would make the schema of
+      a table depend on its contents.
+
+    :mod:`~tmlt.analytics._coerce_pandas_schema` documents why, and what this
+    implies for the relationship between the two backends' inferred schemas.
+
+    Args:
+        dataframe: The DataFrame to describe. Its dtypes must be supported; see
+            :data:`~tmlt.analytics._coerce_pandas_schema.SUPPORTED_PANDAS_DTYPES`.
+
+    Raises:
+        ValueError: If a column's dtype is not supported, or an ``object``
+            column's values are not all strings-or-nulls or all dates-or-nulls.
+    """
+    column_descs: Dict[str, ColumnDescriptor] = {}
+    for column_name in dataframe.columns:
+        column = dataframe[column_name]
+        dtype = column.dtype
+        if dtype == np.dtype(object):
+            column_type = _PANDAS_TO_ANALYTICS_ELEMENT_TYPE[
+                object_column_element_type(column, str(column_name))
+            ]
+        elif dtype in _PANDAS_DTYPE_TO_ANALYTICS:
+            column_type = _PANDAS_DTYPE_TO_ANALYTICS[dtype]
+        else:
+            raise ValueError(
+                f"Unsupported pandas dtype: column '{column_name}' has dtype"
+                f" {dtype}, which Tumult Analytics does not support."
+            )
+        column_descs[column_name] = ColumnDescriptor(
+            column_type=column_type,
+            allow_null=_dtype_allows_null(dtype),
+            # pandas doesn't contain any information on whether a column
+            # contains NaNs, so just assume that it does
+            allow_nan=(column_type == ColumnType.DECIMAL),
+            # Same for infinite values
+            allow_inf=(column_type == ColumnType.DECIMAL),
+        )
+    return column_descs
+
+
+def _dtype_allows_null(dtype: PandasDtype) -> bool:
+    """Returns True if a column of this dtype can represent a null value.
+
+    A pandas nullable extension dtype carries a mask, an ``object`` column can
+    hold ``None``, and a ``datetime64`` column can hold ``NaT``. A numpy integer
+    column has nowhere to put a null, and a numpy float column's missing-looking
+    value is a NaN, which
+    :class:`~tmlt.core.domains.pandas_domains.PandasFloatColumnDescriptor` gates
+    with ``allow_nan`` rather than with ``allow_null``.
+    """
+    if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+        return True
+    return dtype == np.dtype(object) or np.issubdtype(dtype, np.datetime64)
+
+
+def pandas_dataframe_domain_to_analytics_columns(
+    domain: Domain,
+) -> Dict[str, ColumnDescriptor]:
+    """Convert a pandas table domain to Analytics columns.
+
+    This is the inverse of :func:`analytics_to_pandas_columns_descriptor` on the
+    descriptors that function produces; see
+    ``test_pandas_schema_conversion`` for the exact domain on which the
+    round-trip is an identity.
+    """
+    column_descs: Dict[str, ColumnDescriptor] = {}
+    for column_name, descriptor in cast(PandasTableDomain, domain).schema.items():
+        if isinstance(descriptor, PandasFloatColumnDescriptor):
+            column_descs[column_name] = ColumnDescriptor(
+                ColumnType.DECIMAL,
+                allow_null=descriptor.allow_null,
+                allow_nan=descriptor.allow_nan,
+                allow_inf=descriptor.allow_inf,
+            )
+        else:
+            column_descs[column_name] = ColumnDescriptor(
+                column_type=_PANDAS_COLUMN_DESCRIPTOR_TO_ANALYTICS[type(descriptor)],
                 allow_null=descriptor.allow_null,
             )
     return column_descs

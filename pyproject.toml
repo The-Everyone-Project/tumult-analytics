@@ -5,7 +5,29 @@ readme = "README.md"
 authors = []
 license = "Apache-2.0"
 
-dynamic = ["version"]
+# NOTE (The-Everyone-Project fork): this branch pins a static PEP 440 local
+# version instead of deriving it from the git tag.
+#
+#   base = content of the 0.21.0 release plus upstream PR #135 (commit 1d620b0);
+#   versioned 0.21.0+ep.backend.N because uv-dynamic-versioning with
+#   latest-tag=true errors on fork tags and main git-describes as 0.20.2+44.
+#
+# In more detail: `main` is not a descendant of the `0.21.0` tag -- the release
+# was cut on a side branch -- so `git describe` here reports `0.20.2-44-g1d620b0`
+# even though the tree content is 0.21.0 plus one merged PR. Upstream papered
+# over this with `latest-tag = true`, which picks the newest tag by commit date;
+# but uv-dynamic-versioning/dunamai *errors out* when that newest tag does not
+# match `pattern` rather than falling back, so any fork tag we add (e.g.
+# `0.21.0-ep-backend-0`) would break every build and every nox session.
+#
+# A static version sidesteps the whole mechanism. The local segment
+# `+ep.backend.4` sorts after `0.21.0`, satisfies any `>=0.21.0,<0.22`
+# constraint, and PyPI structurally rejects local versions, so this build can
+# never be mistaken for -- or shadowed by -- an official upstream release.
+# Bump the trailing N (`+ep.backend.5`, ...) for each fork release; see
+# RELEASING-ep-backend.md. Keep this in step with `[tool.uv-dynamic-versioning]`
+# below, which nox reads.
+version = "0.21.0+ep.backend.4"
 
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -91,23 +113,55 @@ scripting = [
 # "tmlt.nox_utils" = { path = "../tumult-tools/nox-utils", editable = true }
 "tmlt.nox_utils" = { git = "https://github.com/opendp/tumult-tools.git", subdirectory = "nox-utils" }
 
+# NOTE (The-Everyone-Project fork): DEV-TIME SOURCE ONLY.
+#
+# The pandas backend in this branch is co-developed with the matching Core fork,
+# so the local dev loop resolves `tmlt.core` from a sibling checkout of
+# The-Everyone-Project/tumult-core (branch `release/0.19.1-ep-pandas`, which
+# builds `0.19.1+ep.pandas.1`). The expected layout is two sibling directories:
+#
+#   <parent>/tumult-analytics   <- this repo
+#   <parent>/tumult-core        <- the Core fork
+#
+# If you develop from a `git worktree`, the worktree is not a sibling of
+# tumult-core, so create a symlink next to it that is -- e.g.
+# `ln -s /path/to/tumult-core <worktree-parent>/tumult-core`.
+#
+# CI and downstream consumers do NOT use this path. They install the published
+# fork wheel by URL, e.g. (macOS arm64):
+#   https://github.com/The-Everyone-Project/tumult-core/releases/download/0.19.1-ep-pandas-1/tmlt_core-0.19.1+ep.pandas.1-py3-none-macosx_11_0_arm64.whl
+# See the `[tool.uv.sources]` block in the difference-engine repo for the full
+# platform-marked list, and `noxfile.py` for the dependency-matrix pin.
+"tmlt.core" = { path = "../tumult-core", editable = true }
+
 ################################################################################
 # Build configuration
 
 [build-system]
-requires = ["hatchling", "uv-dynamic-versioning"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.version]
-source = "uv-dynamic-versioning"
-
+# NOTE (The-Everyone-Project fork): `uv-dynamic-versioning` is intentionally
+# dropped from the build requirements and `[tool.hatch.version]` is intentionally
+# removed -- the build no longer derives a version from git, it uses the static
+# `version` in `[project]` above.
+#
+# `[tool.uv-dynamic-versioning]` below is kept only because tmlt.nox_utils reads
+# it (via uv_dynamic_versioning.main.get_version, in nox_utils.package_version)
+# when noxfile.py is imported; without it, every nox session dies with
+# `AttributeError: 'NoneType' object has no attribute 'vcs'`. The constant
+# `format-jinja` makes it report the same version the build produces rather than
+# a tag-derived "0.20.2.post44...", and `fallback-version` covers shallow CI
+# clones where no tag is reachable. `latest-tag` is dropped along with it: it is
+# what makes dunamai error on a non-matching newest tag.
 [tool.uv-dynamic-versioning]
 vcs = "git"
 style = "semver"
 # The default configuration expect vX.Y.Z, but we haven't been using the 'v' prefix.
 pattern = "^(?P<base>\\d+\\.\\d+\\.\\d+)(-(?P<stage>[a-zA-Z]+)\\.(?P<revision>\\d+))?"
 commit-length = 8
-latest-tag = true
+format-jinja = "0.21.0+ep.backend.4"
+fallback-version = "0.21.0+ep.backend.4"
 
 [tool.hatch.build.hooks.version]
 path = "src/tmlt/analytics/_version.py"
@@ -207,6 +261,17 @@ module = "test.*"
 disallow_untyped_defs = false
 check_untyped_defs = true
 
+# pandas ships no py.typed marker, so `pandas.DataFrame` is `Any` to mypy, and a
+# parameter annotated `Union[pyspark.sql.DataFrame, pandas.DataFrame]` -- which
+# is what the builder takes now that it accepts either backend's tables --
+# accepts anything at all. The `# type: ignore` comments this module puts on
+# calls that pass a deliberately wrong dataframe are therefore reported as
+# unused, though at runtime typeguard still rejects those calls, which is what
+# the tests assert. Drop this override if pandas-stubs is ever added.
+[[tool.mypy.overrides]]
+module = "test.unit.base_builder.test_mixins"
+warn_unused_ignores = false
+
 ################################################################################
 # Test configuration
 
@@ -214,10 +279,28 @@ check_untyped_defs = true
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "serial",
+    # NOTE (The-Everyone-Project fork): applied automatically by the collection
+    # hook in test/conftest.py -- never written on a test by hand -- to every test
+    # that needs a Spark session, including the spark half of a test parametrized
+    # over the `backend` fixture. The `test-nojvm` nox session deselects it with
+    # -m "not spark".
+    "spark: needs a Spark session (deselect with '-m \"not spark\"')",
 ]
 # Avoids an re-import issue with serializers. See tumult-labs/tumult#3343 for
 # more information and a better future fix.
 addopts = ["--import-mode=importlib"]
+# NOTE (The-Everyone-Project fork): puts the repository root on sys.path, so that
+# the test tree's own shared modules -- `test.backend_testing`, the
+# backend-parity harness -- can be imported by name from a conftest or a test.
+#
+# `--import-mode=importlib` deliberately does not touch sys.path, which leaves
+# `test` resolving to the *standard library's* `test` package: `test.<anything>`
+# is then importable only when pytest happens to have already imported that exact
+# file as a conftest or a test module. (That is why the pre-existing
+# `from test.conftest import create_empty_input` works, while an import of a
+# shared non-test module fails.) One line here is pytest's documented fix, and it
+# only restores what the default "prepend" import mode would do anyway.
+pythonpath = ["."]
 
 [tool.coverage.run]
 relative_files = true

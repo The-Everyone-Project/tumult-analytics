@@ -4,15 +4,19 @@
 # Copyright Tumult Labs 2025
 
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Optional, overload
 
+import pandas as pd
 from pyspark.sql import DataFrame
+from tmlt.core.utils.pandas_grouping import distinct_rows
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._schema import ColumnDescriptor
 
 from ._base import KeySetOp
+from ._frames import frame_count
 from ._utils import validate_column_names
 
 
@@ -63,13 +67,36 @@ class Project(KeySetOp):
         child_schema = self.child.schema()
         return {c: child_schema[c] for c in self.projected_columns}
 
-    def dataframe(self) -> DataFrame:
+    def children(self) -> tuple[KeySetOp, ...]:
+        """The operations whose outputs this one is computed from."""
+        return (self.child,)
+
+    def with_children(self, children: tuple[KeySetOp, ...]) -> KeySetOp:
+        """This projection over the given child operation."""
+        (child,) = children
+        return replace(self, child=child)
+
+    def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.
 
         This operation may be computationally expensive, even though the full
         dataframe is not evaluated until it is used elsewhere.
         """
-        return self.child.dataframe().select(*self.projected_columns).dropDuplicates()
+        return (
+            self.child._spark_dataframe()
+            .select(*self.projected_columns)
+            .dropDuplicates()
+        )
+
+    def _pandas_dataframe(self) -> pd.DataFrame:
+        """Generate the pandas dataframe corresponding to this operation.
+
+        Deduplication is Core's :func:`~tmlt.core.utils.pandas_grouping.distinct_rows`
+        rather than :meth:`pandas.DataFrame.drop_duplicates`, so that a null and
+        a NaN in an object column stay two rows, as they are on Spark.
+        """
+        projected = self.child._pandas_dataframe()[list(self.projected_columns)]
+        return distinct_rows(projected)
 
     def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""
@@ -80,19 +107,19 @@ class Project(KeySetOp):
         return self.child.is_plan()
 
     @overload
-    def size(self, fast: Literal[True]) -> Optional[int]: ...
+    def size(self, fast: Literal[True], backend: Backend = SPARK) -> Optional[int]: ...
 
     @overload
-    def size(self, fast: Literal[False]) -> int: ...
+    def size(self, fast: Literal[False], backend: Backend = SPARK) -> int: ...
 
     @overload
-    def size(self, fast: bool) -> Optional[int]: ...
+    def size(self, fast: bool, backend: Backend = SPARK) -> Optional[int]: ...
 
-    def size(self, fast):
+    def size(self, fast, backend=SPARK):
         """Determine the size of the KeySet resulting from this operation."""
         if fast:
             return None
-        return self.dataframe().count()
+        return frame_count(self.dataframe(backend))
 
     def __str__(self):
         """Human-readable string representation."""

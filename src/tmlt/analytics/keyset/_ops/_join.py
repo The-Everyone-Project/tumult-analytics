@@ -4,15 +4,19 @@
 # Copyright Tumult Labs 2025
 
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Collection, Literal, Optional, overload
 
+import pandas as pd
 from pyspark.sql import DataFrame
 from tmlt.core.utils.join import join
+from tmlt.core.utils.pandas_join import join as pandas_join
 
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._schema import ColumnDescriptor
 
 from ._base import KeySetOp
+from ._frames import frame_count, frame_is_empty
 
 
 @dataclass(frozen=True)
@@ -73,41 +77,65 @@ class Join(KeySetOp):
 
         return schema
 
-    def dataframe(self) -> DataFrame:
+    def children(self) -> tuple[KeySetOp, ...]:
+        """The operations whose outputs this one is computed from."""
+        return (self.left, self.right)
+
+    def with_children(self, children: tuple[KeySetOp, ...]) -> KeySetOp:
+        """This join over the given left and right operations."""
+        left, right = children
+        return replace(self, left=left, right=right)
+
+    def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.
 
         This operation may be computationally expensive, even though the full
         dataframe is not evaluated until it is used elsewhere.
         """
         return join(
-            self.left.dataframe(),
-            self.right.dataframe(),
+            self.left._spark_dataframe(),
+            self.right._spark_dataframe(),
+            on=list(self.join_columns()),
+            nulls_are_equal=True,
+        )
+
+    def _pandas_dataframe(self) -> pd.DataFrame:
+        """Generate the pandas dataframe corresponding to this operation.
+
+        Core's :func:`~tmlt.core.utils.pandas_join.join` answers the same
+        question its Spark counterpart above does -- which rows pair up, what
+        the output columns are called and in what order -- so the two backends
+        produce the same keys.
+        """
+        return pandas_join(
+            self.left._pandas_dataframe(),
+            self.right._pandas_dataframe(),
             on=list(self.join_columns()),
             nulls_are_equal=True,
         )
 
     def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""
-        return self.dataframe().isEmpty()
+        return frame_is_empty(self.dataframe())
 
     def is_plan(self) -> bool:
         """Determine whether this plan has any parts requiring partition selection."""
         return self.left.is_plan() or self.right.is_plan()
 
     @overload
-    def size(self, fast: Literal[True]) -> Optional[int]: ...
+    def size(self, fast: Literal[True], backend: Backend = SPARK) -> Optional[int]: ...
 
     @overload
-    def size(self, fast: Literal[False]) -> int: ...
+    def size(self, fast: Literal[False], backend: Backend = SPARK) -> int: ...
 
     @overload
-    def size(self, fast: bool) -> Optional[int]: ...
+    def size(self, fast: bool, backend: Backend = SPARK) -> Optional[int]: ...
 
-    def size(self, fast):
+    def size(self, fast, backend=SPARK):
         """Determine the size of the KeySet resulting from this operation."""
         if fast:
             return None
-        return self.dataframe().count()
+        return frame_count(self.dataframe(backend))
 
     def __str__(self):
         """Human-readable string representation."""

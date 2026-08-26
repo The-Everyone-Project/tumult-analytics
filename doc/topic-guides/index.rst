@@ -18,4 +18,5 @@ to the Tumult Analytics library.
     privacy-budgets
     understanding-sensitivity
     nulls-nans-infinities
+    backends
 

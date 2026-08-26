@@ -70,6 +70,7 @@ from tmlt.analytics import (
     RhoZCDPBudget,
     Session,
 )
+from tmlt.analytics._catalog import Catalog
 from tmlt.analytics._neighboring_relation import (
     AddRemoveKeys,
     AddRemoveRows,
@@ -2786,3 +2787,94 @@ def test_describe_query_obj(
     print("EXPECTED TABLE:\n", expected_output, "\n")
     print("RESULT TABLE:\n", table)
     assert expected_output in table
+
+
+###############################################################################
+# The catalog the compiler is handed.
+###############################################################################
+
+
+def _catalog_the_slow_way(session: Session) -> Catalog:
+    """The catalog, assembled through the four public accessors.
+
+    This is what ``Session._catalog`` used to be, kept as the reference the
+    single-pass version is checked against. The two must agree exactly: the
+    fast one is the same four questions with the domain search hoisted out and
+    shared, not a different set of answers.
+    """
+    # pylint: disable=protected-access
+    catalog = Catalog()
+    for table in session.private_sources:
+        catalog.add_private_table(
+            table,
+            session.get_schema(table),
+            constraints=session._table_constraints[NamedTable(table)],
+            grouping_column=session.get_grouping_column(table),
+            id_column=session.get_id_column(table),
+            id_space=session.get_id_space(table),
+        )
+    for table in session.public_sources:
+        catalog.add_public_table(
+            table,
+            spark_schema_to_analytics_columns(
+                session.public_source_dataframes[table].schema
+            ),
+            session.public_source_dataframes[table],
+        )
+    return catalog
+
+
+def test_catalog_matches_the_accessors(spark: SparkSession):
+    """One walk of the domain describes the tables the four accessors describe.
+
+    Every table shape a Session can hold is in here, because each is a branch
+    of the walk: a plain table, one protected by AddMaxRows, two ID tables in
+    one space and one in another, a view, a view over an ID table, a table with
+    a grouping column, and a public table.
+    """
+    frame = spark.createDataFrame(
+        pd.DataFrame({"A": ["a", "b"], "B": [1, 2], "C": [1.0, 2.0], "id": ["x", "y"]})
+    )
+    public = spark.createDataFrame(pd.DataFrame({"A": ["a"], "F": [1]}))
+    session = (
+        Session.Builder()
+        .with_privacy_budget(PureDPBudget(1000))
+        .with_id_space("s1")
+        .with_id_space("s2")
+        .with_private_dataframe("plain", frame, AddOneRow())
+        .with_private_dataframe("max_rows", frame, AddMaxRows(3))
+        .with_private_dataframe("ids1", frame, AddRowsWithID("id", "s1"))
+        .with_private_dataframe("ids2", frame, AddRowsWithID("id", "s1"))
+        .with_private_dataframe("other_space", frame, AddRowsWithID("id", "s2"))
+        .with_public_dataframe("pub", public)
+        .build()
+    )
+    session.create_view(QueryBuilder("plain").select(["A"]), "view", cache=False)
+    session.create_view(
+        QueryBuilder("ids1").enforce(MaxRowsPerID(2)), "id_view", cache=False
+    )
+    session.create_view(
+        QueryBuilder("plain").flat_map(
+            lambda row: [{"g": "x"}],
+            {"g": "VARCHAR"},
+            augment=True,
+            max_rows=1,
+            grouping=True,
+        ),
+        "grouped",
+        cache=False,
+    )
+
+    # pylint: disable=protected-access
+    catalog = session._catalog
+    reference = _catalog_the_slow_way(session)
+    assert catalog.private_tables == reference.private_tables
+    assert catalog.public_tables == reference.public_tables
+    # ...and the shapes really are all present, so that the agreement above is
+    # an agreement about something.
+    assert catalog.private_tables["grouped"].schema.grouping_column == "g"
+    assert catalog.private_tables["ids1"].schema.id_column == "id"
+    assert catalog.private_tables["ids1"].schema.id_space == "s1"
+    assert catalog.private_tables["other_space"].schema.id_space == "s2"
+    assert catalog.private_tables["plain"].schema.id_space is None
+    assert set(catalog.public_tables) == {"pub"}

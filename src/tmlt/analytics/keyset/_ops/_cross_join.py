@@ -8,16 +8,19 @@ from __future__ import annotations
 import itertools
 import operator
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import reduce
-from typing import Collection, Iterator, Literal, Optional, overload
+from typing import Collection, Iterator, Literal, Mapping, Optional, overload
 
+import pandas as pd
 from pyspark.sql import DataFrame, SparkSession
 
 from tmlt.analytics import AnalyticsInternalError
+from tmlt.analytics._backends import SPARK, Backend
 from tmlt.analytics._schema import ColumnDescriptor, Schema, analytics_to_spark_schema
 
 from ._base import KeySetOp
+from ._frames import pandas_frame_from_tuples
 from ._from_tuples import FromTuples
 
 
@@ -58,7 +61,15 @@ class CrossJoin(KeySetOp):
         """Get the schema of the output of this operation."""
         return reduce(operator.or_, (f.schema() for f in self.factors))
 
-    def dataframe(self) -> DataFrame:
+    def children(self) -> tuple[KeySetOp, ...]:
+        """The operations whose outputs this one is computed from."""
+        return self.factors
+
+    def with_children(self, children: tuple[KeySetOp, ...]) -> KeySetOp:
+        """This cross-join over the given factors."""
+        return replace(self, factors=tuple(children))
+
+    def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.
 
         This operation may be computationally expensive, even though the full
@@ -93,11 +104,29 @@ class CrossJoin(KeySetOp):
         # to total aggregations. If *only* factors like that are present, just
         # return the dataframe for one of them; otherwise, ignore them and do
         # the cross-join on the remaining factors.
-        nonempty_dfs = [f.dataframe() for f in self.factors if len(f.columns()) > 0]
+        nonempty_dfs = [
+            f._spark_dataframe() for f in self.factors if len(f.columns()) > 0
+        ]
         if len(nonempty_dfs) == 0:
-            return self.factors[0].dataframe()
+            return self.factors[0]._spark_dataframe()
 
         return reduce(cross_join, nonempty_dfs)
+
+    def _pandas_dataframe(self) -> pd.DataFrame:
+        """Generate the pandas dataframe corresponding to this operation.
+
+        The partition tuning the Spark path does has no counterpart here -- a
+        pandas frame is one partition -- so this is the same reduction over
+        ``merge(how="cross")``, with the same handling of the total-aggregation
+        factors that have no columns to cross.
+        """
+        nonempty_dfs = [
+            f._pandas_dataframe() for f in self.factors if len(f.columns()) > 0
+        ]
+        if len(nonempty_dfs) == 0:
+            return self.factors[0]._pandas_dataframe()
+
+        return reduce(lambda l, r: l.merge(r, how="cross"), nonempty_dfs)
 
     def is_empty(self) -> bool:
         """Determine whether the dataframe corresponding to this operation is empty."""
@@ -108,17 +137,17 @@ class CrossJoin(KeySetOp):
         return any(f.is_plan() for f in self.factors)
 
     @overload
-    def size(self, fast: Literal[True]) -> Optional[int]: ...
+    def size(self, fast: Literal[True], backend: Backend = SPARK) -> Optional[int]: ...
 
     @overload
-    def size(self, fast: Literal[False]) -> int: ...
+    def size(self, fast: Literal[False], backend: Backend = SPARK) -> int: ...
 
     @overload
-    def size(self, fast: bool) -> Optional[int]: ...
+    def size(self, fast: bool, backend: Backend = SPARK) -> Optional[int]: ...
 
-    def size(self, fast):
+    def size(self, fast, backend=SPARK):
         """Determine the size of the KeySet resulting from this operation."""
-        sizes = [f.size(fast=fast) for f in self.factors]
+        sizes = [f.size(fast=fast, backend=backend) for f in self.factors]
         if fast and None in sizes:
             return None
         return reduce(operator.mul, sizes)
@@ -170,15 +199,17 @@ class InMemoryCrossJoin(CrossJoin):
                 "InMemoryCrossJoin instantiated with total-aggregation factor."
             )
 
-    def dataframe(self):
+    def _column_descriptors(self) -> Mapping[str, ColumnDescriptor]:
+        """The columns of this cross-join, in the order its rows give them in."""
+        return reduce(operator.or_, (f.column_descriptors for f in self.factors))
+
+    def _spark_dataframe(self) -> DataFrame:
         """Generate the Spark dataframe corresponding to this operation.
 
         This operation may be computationally expensive, even though the full
         dataframe is not evaluated until it is used elsewhere.
         """
-        schema = analytics_to_spark_schema(
-            Schema(reduce(operator.or_, (f.column_descriptors for f in self.factors)))
-        )
+        schema = analytics_to_spark_schema(Schema(dict(self._column_descriptors())))
         spark = SparkSession.builder.getOrCreate()
 
         size = self.size(fast=True)
@@ -191,6 +222,15 @@ class InMemoryCrossJoin(CrossJoin):
             spark.sparkContext.parallelize(iter(self), numSlices=2 + size // 1024),
             schema=schema,
         )
+
+    def _pandas_dataframe(self) -> pd.DataFrame:
+        """Generate the pandas dataframe corresponding to this operation.
+
+        The rows are computed in Python either way, so this shares the Spark
+        path's Cartesian product rather than reducing over pandas merges as
+        :meth:`CrossJoin._pandas_dataframe` does.
+        """
+        return pandas_frame_from_tuples(iter(self), self._column_descriptors())
 
     def __iter__(self) -> Iterator[tuple]:
         """Return an iterator of tuples corresponding to keys."""
