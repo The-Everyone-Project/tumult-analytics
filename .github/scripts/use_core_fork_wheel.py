@@ -20,7 +20,7 @@ from pathlib import Path
 
 WHEEL_BASE = (
     "https://github.com/The-Everyone-Project/tumult-core/releases/download/"
-    "0.19.1-ep-pandas-1/tmlt_core-0.19.1+ep.pandas.1-py3-none-"
+    "0.19.1-ep-backend-3/tmlt_core-0.19.1+ep.backend.3-py3-none-"
 )
 
 # The fork wheels are tagged py3-none-<platform>: pure Python, but with
@@ -45,12 +45,15 @@ def main() -> int:
         return 1
 
     text = pyproject.read_text()
-    if WHEEL_BASE in text:
-        print("tmlt.core already points at the fork wheel; nothing to do")
-        return 0
-
     text, count = PATH_SOURCE.subn(f'"tmlt.core" = {WHEEL_SOURCES}', text)
     if count != 1:
+        # Idempotence is decided by the rewritten source block, not by the URL:
+        # the comment above the dev-time source quotes one of these wheel URLs
+        # as its example, so a `WHEEL_BASE in text` check matches a file that
+        # has never been rewritten and silently leaves the path source in place.
+        if count == 0 and WHEEL_SOURCES in text:
+            print("tmlt.core already points at the fork wheel; nothing to do")
+            return 0
         print(
             "error: expected exactly one editable-path tmlt.core source in "
             f"pyproject.toml, found {count}",

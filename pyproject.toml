@@ -117,8 +117,8 @@ scripting = [
 #
 # The pandas backend in this branch is co-developed with the matching Core fork,
 # so the local dev loop resolves `tmlt.core` from a sibling checkout of
-# The-Everyone-Project/tumult-core (branch `release/0.19.1-ep-pandas`, which
-# builds `0.19.1+ep.pandas.1`). The expected layout is two sibling directories:
+# The-Everyone-Project/tumult-core (branch `main`, which builds
+# `0.19.1+ep.backend.3`). The expected layout is two sibling directories:
 #
 #   <parent>/tumult-analytics   <- this repo
 #   <parent>/tumult-core        <- the Core fork
@@ -129,7 +129,7 @@ scripting = [
 #
 # CI and downstream consumers do NOT use this path. They install the published
 # fork wheel by URL, e.g. (macOS arm64):
-#   https://github.com/The-Everyone-Project/tumult-core/releases/download/0.19.1-ep-pandas-1/tmlt_core-0.19.1+ep.pandas.1-py3-none-macosx_11_0_arm64.whl
+#   https://github.com/The-Everyone-Project/tumult-core/releases/download/0.19.1-ep-backend-3/tmlt_core-0.19.1+ep.backend.3-py3-none-macosx_11_0_arm64.whl
 # See the `[tool.uv.sources]` block in the difference-engine repo for the full
 # platform-marked list, and `noxfile.py` for the dependency-matrix pin.
 "tmlt.core" = { path = "../tumult-core", editable = true }

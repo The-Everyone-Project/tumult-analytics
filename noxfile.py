@@ -84,7 +84,7 @@ def is_mac():
 # pandas backend depends on, so those two matrix cells would install a Core that
 # cannot run this branch's tests.
 #
-# `"==0.19.1+ep.pandas.1"` is not a fix: the fork build is deliberately a PEP 440
+# `"==0.19.1+ep.backend.3"` is not a fix: the fork build is deliberately a PEP 440
 # local version, and PyPI rejects local versions, so there is nothing to resolve
 # against. Instead we point those cells at the published fork wheel as a PEP 508
 # direct reference. tmlt.nox_utils builds each pin by plain string concatenation
@@ -97,13 +97,13 @@ def is_mac():
 # vendored libs), so one URL per platform covers Python 3.10-3.12.
 #
 # TODO: the `>=0.19.1` cells still resolve from PyPI. They are currently
-# harmless -- `uv pip install` keeps the already-installed 0.19.1+ep.pandas.1,
+# harmless -- `uv pip install` keeps the already-installed 0.19.1+ep.backend.3,
 # which satisfies the constraint -- but if upstream ever publishes a 0.19.x
 # newer than the fork base, those cells will silently upgrade to a Core without
 # the pandas modules. Repoint them at the fork wheel if that happens.
 _EP_CORE_WHEEL_BASE = (
     "https://github.com/The-Everyone-Project/tumult-core/releases/download/"
-    "0.19.1-ep-pandas-1/tmlt_core-0.19.1+ep.pandas.1-py3-none-"
+    "0.19.1-ep-backend-3/tmlt_core-0.19.1+ep.backend.3-py3-none-"
 )
 
 

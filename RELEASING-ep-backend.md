@@ -91,11 +91,11 @@ this Analytics wheel against `ep.pandas.1` will import Analytics fine and then
 raise `BackendUnavailable` the moment it asks for the pandas backend.
 
 So: **cut the Core `0.19.1+ep.backend.N` wheel set first**, following the Core
-fork's runbook, and then repoint the three places in this repository that still
-name the older Core build by URL. This build pairs with Core
-`0.19.1+ep.backend.3`, whose integration line is what the suite here was run
-against; the three URLs below still name `0.19.1+ep.pandas.1`, and stay wrong
-until that wheel set is uploaded and they are repointed:
+fork's runbook, and then repoint the three places in this repository that name
+the Core build by URL. This build pairs with Core `0.19.1+ep.backend.3`, whose
+integration line is what the suite here was run against; that wheel set was
+released on 2026-08-27 and the three URLs below were repointed to it at the
+same time:
 
 * `.github/scripts/use_core_fork_wheel.py`, `WHEEL_BASE` — the URL prefix this
   script rewrites the dev-time path source into, and therefore the Core that every
