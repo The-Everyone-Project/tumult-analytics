@@ -7,12 +7,19 @@ path does not exist in CI (or in any consumer's environment), so this script
 rewrites the ``[tool.uv.sources]`` entry in place to the published fork wheel and
 re-locks.
 
+In CI this must run *before* the runner-setup action, whose own ``uv sync`` would
+otherwise be the first thing to resolve the path source and fail on it. That is
+earlier than ``uv`` exists on the runner, so ``--no-lock`` skips the re-lock and
+leaves it to the ``uv sync`` that follows; the rewrite itself is plain text
+editing and needs nothing but the interpreter.
+
 It is deliberately a separate, idempotent script rather than an inline ``run:``
 block so that the same command can be used to reproduce a CI environment
 locally. Run it from the repository root; it edits ``pyproject.toml`` and
 ``uv.lock`` in the working tree and is not meant to be committed back.
 """
 
+import argparse
 import re
 import subprocess
 import sys
@@ -38,7 +45,16 @@ PATH_SOURCE = re.compile(
 
 
 def main() -> int:
-    """Rewrite the source and re-lock."""
+    """Rewrite the source and, unless ``--no-lock`` is given, re-lock."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--no-lock",
+        action="store_true",
+        help="rewrite pyproject.toml only; do not invoke `uv lock`. For use "
+        "before uv is installed -- the next `uv sync` re-resolves anyway.",
+    )
+    args = parser.parse_args()
+
     pyproject = Path("pyproject.toml")
     if not pyproject.is_file():
         print("error: run this from the repository root", file=sys.stderr)
@@ -62,9 +78,12 @@ def main() -> int:
         return 1
 
     pyproject.write_text(text)
-    print("repointed tmlt.core at the fork wheel; re-locking")
     # The committed lock refers to the path source, so it must be regenerated.
     # `uv lock --check` is intentionally *not* run after this point.
+    if args.no_lock:
+        print("repointed tmlt.core at the fork wheel; leaving the lock stale")
+        return 0
+    print("repointed tmlt.core at the fork wheel; re-locking")
     return subprocess.call(["uv", "lock"])
 
 

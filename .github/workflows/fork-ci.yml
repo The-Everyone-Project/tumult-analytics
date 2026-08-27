@@ -39,13 +39,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      # MUST precede "Set up runner": that action's own `uv sync` is the first
+      # thing to resolve tmlt.core, and the committed source is a sibling
+      # checkout that does not exist here. `--no-lock` because uv is not
+      # installed yet; the setup action's `uv sync` re-resolves against the
+      # rewritten source.
+      - name: Point tmlt.core at the fork wheel
+        run: ./.github/scripts/use_core_fork_wheel.py --no-lock
       - name: Set up runner
         uses: opendp/tumult-tools/actions/setup@0f3d49599e5824a9f407a6e2063990c1e0d4c2e8
-      # Validate the committed lockfile against the committed pyproject before
-      # the fork-wheel rewrite below invalidates it.
-      - run: uv lock --check
-      - name: Point tmlt.core at the fork wheel
-        run: ./.github/scripts/use_core_fork_wheel.py
       - run: uv run nox -s build
       - name: Archive packaged library
         uses: actions/upload-artifact@v4
@@ -60,6 +62,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      # MUST precede "Set up runner": that action's own `uv sync` is the first
+      # thing to resolve tmlt.core, and the committed source is a sibling
+      # checkout that does not exist here. `--no-lock` because uv is not
+      # installed yet; the setup action's `uv sync` re-resolves against the
+      # rewritten source.
+      - name: Point tmlt.core at the fork wheel
+        run: ./.github/scripts/use_core_fork_wheel.py --no-lock
       - name: Set up runner
         uses: opendp/tumult-tools/actions/setup@0f3d49599e5824a9f407a6e2063990c1e0d4c2e8
       - name: Download dist
@@ -67,8 +76,6 @@ jobs:
         with:
           name: dist
           path: dist
-      - name: Point tmlt.core at the fork wheel
-        run: ./.github/scripts/use_core_fork_wheel.py
       - run: uv run nox -t lint
 
   Test:
@@ -80,6 +87,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      # MUST precede "Set up runner": that action's own `uv sync` is the first
+      # thing to resolve tmlt.core, and the committed source is a sibling
+      # checkout that does not exist here. `--no-lock` because uv is not
+      # installed yet; the setup action's `uv sync` re-resolves against the
+      # rewritten source.
+      - name: Point tmlt.core at the fork wheel
+        run: ./.github/scripts/use_core_fork_wheel.py --no-lock
       - name: Set up runner
         uses: opendp/tumult-tools/actions/setup@0f3d49599e5824a9f407a6e2063990c1e0d4c2e8
       - name: Download dist
@@ -87,8 +101,6 @@ jobs:
         with:
           name: dist
           path: dist
-      - name: Point tmlt.core at the fork wheel
-        run: ./.github/scripts/use_core_fork_wheel.py
       # GitHub's ubuntu-latest runners ship a JDK, which the Spark-backed tests
       # need; no extra setup-java step is required.
       - run: uv run nox -s smoketest test-fast
