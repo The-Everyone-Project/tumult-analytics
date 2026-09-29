@@ -20,6 +20,7 @@ Fixed
 ~~~~~
 
 - Fixed a bug in constraint propagation through the :meth:`~.join_private` query causing the wrong type of constraint to be produced.
+- Improved the performance of :meth:`~tmlt.analytics.Session.evaluate` on Sessions with many private tables, by no longer evaluating the privacy relation of each query in the Session in addition to the privacy accountant, and by computing the stability of each query's transformation once instead of twice.
 
 
 .. _v0.21.0:

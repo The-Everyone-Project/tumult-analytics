@@ -1121,13 +1121,11 @@ class Session:
             )
 
         try:
-            if not measurement.privacy_relation(
-                self._accountant.d_in, adjusted_budget.value
-            ):
-                raise AnalyticsInternalError(
-                    "With these inputs and this privacy budget, similar inputs will"
-                    " *not* produce similar outputs."
-                )
+            # PrivacyAccountant.measure checks that the measurement's privacy
+            # relation holds for the accountant's d_in and this d_out before it
+            # spends any budget or runs the measurement, so it is not checked here
+            # as well: with many tables, each evaluation of the relation validates
+            # the whole session-wide distance dictionary.
             try:
                 return self._accountant.measure(
                     measurement, d_out=adjusted_budget.value
@@ -1142,6 +1140,25 @@ class Session:
                     "Cannot answer query without exceeding the Session privacy budget."
                     + msg
                 ) from err
+            except ValueError as err:
+                # The accountant rejects a measurement whose privacy relation does
+                # not hold with a ValueError. The compiler has already checked the
+                # measurement's privacy function against this budget, so that
+                # would be a bug: report it as an internal error. The relation is
+                # only re-evaluated here, on the error path, to tell that case
+                # apart from other errors, which are re-raised unchanged.
+                try:
+                    relation_failed = not measurement.privacy_relation(
+                        self._accountant.d_in, adjusted_budget.value
+                    )
+                except Exception:
+                    relation_failed = False
+                if relation_failed:
+                    raise AnalyticsInternalError(
+                        "With these inputs and this privacy budget, similar inputs"
+                        " will *not* produce similar outputs."
+                    ) from err
+                raise
         except InactiveAccountantError as e:
             raise RuntimeError(
                 "This session is no longer active. Either it was manually stopped "

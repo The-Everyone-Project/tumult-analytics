@@ -5,7 +5,7 @@
 
 import re
 from typing import Any, Dict, List, Tuple, Type, Union
-from unittest.mock import ANY, Mock, patch
+from unittest.mock import ANY, Mock, create_autospec, patch
 
 import pandas as pd
 import pytest
@@ -56,6 +56,7 @@ from tmlt.analytics import (
     AddMaxRowsInMaxGroups,
     AddOneRow,
     AddRowsWithID,
+    AnalyticsInternalError,
     ApproxDPBudget,
     Constraint,
     KeySet,
@@ -77,6 +78,7 @@ from tmlt.analytics._neighboring_relation import (
     Conjunction,
     NeighboringRelation,
 )
+from tmlt.analytics._noise_info import NoiseInfo
 from tmlt.analytics._query_expr_compiler import QueryExprCompiler
 from tmlt.analytics._schema import (
     ColumnDescriptor,
@@ -704,6 +706,74 @@ class TestSession:
                     query_expr=QueryBuilder("private").count(),
                     privacy_budget=RhoZCDPBudget(10),
                 )
+
+    @pytest.mark.parametrize(
+        "measure_error,relation_holds,expected_error,expected_msg",
+        [
+            (None, None, None, None),
+            (
+                ValueError("Given d_out (1) does not satisfy the privacy relation"),
+                False,
+                AnalyticsInternalError,
+                r"similar inputs will \*not\* produce similar outputs",
+            ),
+            (
+                ValueError("Some other error"),
+                True,
+                ValueError,
+                "Some other error",
+            ),
+        ],
+    )
+    def test_evaluate_privacy_relation_checked_by_accountant(
+        self,
+        spark,
+        measure_error: Any,
+        relation_holds: Any,
+        expected_error: Any,
+        expected_msg: Any,
+    ):
+        """Evaluate leaves the privacy relation check to the accountant.
+
+        The Session does not evaluate the compiled measurement's privacy relation
+        itself before calling the accountant (which checks it); it only evaluates it
+        when the accountant raises a ValueError, to report a failed privacy relation
+        as an internal error.
+        """
+        with (
+            patch.object(QueryExprCompiler, "__call__", autospec=True) as mock_compiler,
+            patch(
+                "tmlt.core.measurements.interactive_measurements.PrivacyAccountant"
+            ) as mock_accountant,
+        ):
+            self._setup_accountant_and_compiler(
+                spark, ExactNumber(1), mock_accountant, mock_compiler
+            )
+            mock_accountant.privacy_budget = ExactNumber(10)
+            measurement = create_autospec(spec=Measurement, instance=True)
+            measurement.privacy_relation.return_value = relation_holds
+            mock_compiler.return_value = (measurement, NoiseInfo([]))
+            if measure_error is not None:
+                mock_accountant.measure.side_effect = measure_error
+            session = Session(accountant=mock_accountant, public_sources={})
+            query = QueryBuilder("private").count()
+
+            if expected_error is None:
+                session.evaluate(query, privacy_budget=PureDPBudget(1))
+                measurement.privacy_relation.assert_not_called()
+            else:
+                with pytest.raises(expected_error, match=expected_msg) as exc_info:
+                    session.evaluate(query, privacy_budget=PureDPBudget(1))
+                if expected_error is AnalyticsInternalError:
+                    assert exc_info.value.__cause__ is measure_error
+                else:
+                    assert exc_info.value is measure_error
+                measurement.privacy_relation.assert_called_once_with(
+                    mock_accountant.d_in, ExactNumber(1)
+                )
+            mock_accountant.measure.assert_called_once_with(
+                measurement, d_out=ExactNumber(1)
+            )
 
     def _setup_accountant(
         self, mock_accountant, d_in=None, privacy_budget=None

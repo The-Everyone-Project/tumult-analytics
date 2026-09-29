@@ -1021,7 +1021,7 @@ class MeasurementVisitor(QueryExprVisitor):
         ) = self._build_adaptive_groupby_agg_and_noise_info(
             input_domain=mid_domain,
             input_metric=mid_metric,
-            stability=transformation.stability_function(self.stability),
+            stability=mid_stability,
             mechanism=mechanism,
             columns=groupby_cols,
             keyset=expr.groupby_keys,
@@ -1135,7 +1135,7 @@ class MeasurementVisitor(QueryExprVisitor):
         ) = self._build_adaptive_groupby_agg_and_noise_info(
             input_domain=mid_domain,
             input_metric=mid_metric,
-            stability=transformation.stability_function(self.stability),
+            stability=mid_stability,
             mechanism=mechanism,
             columns=groupby_cols,
             keyset=expr.groupby_keys,
@@ -1235,7 +1235,7 @@ class MeasurementVisitor(QueryExprVisitor):
         ) = self._build_adaptive_groupby_agg_and_noise_info(
             input_domain=mid_domain,
             input_metric=mid_metric,
-            stability=transformation.stability_function(self.stability),
+            stability=mid_stability,
             mechanism=self.default_mechanism,
             columns=groupby_cols,
             keyset=expr.groupby_keys,
@@ -1336,7 +1336,7 @@ class MeasurementVisitor(QueryExprVisitor):
         ) = self._build_adaptive_groupby_agg_and_noise_info(
             input_domain=mid_domain,
             input_metric=mid_metric,
-            stability=transformation.stability_function(self.stability),
+            stability=mid_stability,
             mechanism=mechanism,
             columns=groupby_cols,
             keyset=expr.groupby_keys,
@@ -1437,7 +1437,7 @@ class MeasurementVisitor(QueryExprVisitor):
         ) = self._build_adaptive_groupby_agg_and_noise_info(
             input_domain=mid_domain,
             input_metric=mid_metric,
-            stability=transformation.stability_function(self.stability),
+            stability=mid_stability,
             mechanism=mechanism,
             columns=groupby_cols,
             keyset=expr.groupby_keys,
@@ -1538,7 +1538,7 @@ class MeasurementVisitor(QueryExprVisitor):
         ) = self._build_adaptive_groupby_agg_and_noise_info(
             input_domain=mid_domain,
             input_metric=mid_metric,
-            stability=transformation.stability_function(self.stability),
+            stability=mid_stability,
             mechanism=mechanism,
             columns=groupby_cols,
             keyset=expr.groupby_keys,
@@ -1639,7 +1639,7 @@ class MeasurementVisitor(QueryExprVisitor):
         ) = self._build_adaptive_groupby_agg_and_noise_info(
             input_domain=mid_domain,
             input_metric=mid_metric,
-            stability=transformation.stability_function(self.stability),
+            stability=mid_stability,
             mechanism=mechanism,
             columns=groupby_cols,
             keyset=expr.groupby_keys,
@@ -1765,7 +1765,7 @@ class MeasurementVisitor(QueryExprVisitor):
         ) = self._build_adaptive_groupby_agg_and_noise_info(
             input_domain=mid_domain,
             input_metric=mid_metric,
-            stability=transformation.stability_function(self.stability),
+            stability=mid_stability,
             mechanism=self.default_mechanism,
             columns=groupby_cols,
             keyset=expr.groupby_keys,

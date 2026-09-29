@@ -4,7 +4,8 @@
 # Copyright Tumult Labs 2025
 
 import datetime
-from typing import Dict, Union
+from typing import Any, Dict, Union
+from unittest.mock import create_autospec, patch
 
 import numpy as np
 import pandas as pd
@@ -28,12 +29,22 @@ from tmlt.core.domains.spark_domains import (
     SparkIntegerColumnDescriptor,
     SparkStringColumnDescriptor,
 )
-from tmlt.core.measures import PureDP, RhoZCDP
+from tmlt.core.measurements.base import Measurement
+from tmlt.core.measures import ApproxDP, PureDP, RhoZCDP
 from tmlt.core.metrics import DictMetric, SymmetricDifference
+from tmlt.core.utils.exact_number import ExactNumber
 from tmlt.core.utils.testing import assert_dataframe_equal
 
-from tmlt.analytics import KeySet, PureDPBudget, RhoZCDPBudget, TruncationStrategy
+from tmlt.analytics import (
+    AnalyticsInternalError,
+    ApproxDPBudget,
+    KeySet,
+    PureDPBudget,
+    RhoZCDPBudget,
+    TruncationStrategy,
+)
 from tmlt.analytics._catalog import Catalog
+from tmlt.analytics._noise_info import NoiseInfo
 from tmlt.analytics._query_expr import (
     AverageMechanism,
     CountMechanism,
@@ -1417,3 +1428,80 @@ def setup_components(request):
         col_types={"A": ColumnType.VARCHAR, "X": ColumnType.INTEGER},
         constraints=[],
     )
+
+
+@pytest.mark.usefixtures("test_component_data")
+class TestCompilerPrivacyFunctionCheck:
+    """Tests that the compiler checks the compiled measurement's privacy function.
+
+    The Session relies on this check (together with the privacy accountant's own
+    privacy relation check) instead of evaluating the privacy relation itself.
+    """
+
+    _stability: Dict
+    _privacy_budget: PureDPBudget
+    _input_domain: DictDomain
+    _input_metric: DictMetric
+    _catalog: Catalog
+
+    @pytest.mark.parametrize(
+        "budget,privacy_function_value,expect_error",
+        [
+            (PureDPBudget(5), ExactNumber(5), False),
+            (PureDPBudget(5), ExactNumber(6), True),
+            # Using less budget than requested is also a (non-privacy) bug.
+            (PureDPBudget(5), ExactNumber(4), True),
+            (ApproxDPBudget(5, 0), (ExactNumber(5), ExactNumber(0)), False),
+            (ApproxDPBudget(5, 0), (ExactNumber(6), ExactNumber(0)), True),
+            (
+                ApproxDPBudget(5, 0),
+                (ExactNumber(5), ExactNumber.from_float(0.1, round_up=True)),
+                True,
+            ),
+        ],
+    )
+    def test_privacy_function_mismatch(
+        self,
+        budget: Union[PureDPBudget, ApproxDPBudget],
+        privacy_function_value: Any,
+        expect_error: bool,
+    ):
+        """The compiler rejects measurements that don't match the budget."""
+        query = GroupByCount(
+            child=PrivateSource("test"), groupby_keys=KeySet.from_dict({})
+        )
+        measurement = create_autospec(spec=Measurement, instance=True)
+        measurement.privacy_function.return_value = privacy_function_value
+        with patch(
+            "tmlt.analytics._query_expr_compiler._compiler.MeasurementVisitor"
+        ) as mock_visitor_class:
+            mock_visitor = mock_visitor_class.return_value
+            mock_visitor.visit_groupby_count.return_value = (
+                measurement,
+                NoiseInfo([]),
+            )
+            mock_visitor.adjusted_budget = budget
+            output_measure = (
+                ApproxDP() if isinstance(budget, ApproxDPBudget) else PureDP()
+            )
+            compiler = QueryExprCompiler(output_measure)
+
+            def compile_query():
+                return compiler(
+                    query,
+                    privacy_budget=budget,
+                    stability=self._stability,
+                    input_domain=self._input_domain,
+                    input_metric=self._input_metric,
+                    catalog=self._catalog,
+                )
+
+            if expect_error:
+                with pytest.raises(
+                    AnalyticsInternalError,
+                    match="Query measurement privacy function does not match",
+                ):
+                    compile_query()
+            else:
+                assert compile_query()[0] is measurement
+        measurement.privacy_function.assert_called_once_with(self._stability)

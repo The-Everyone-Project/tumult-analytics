@@ -4,7 +4,7 @@
 # Copyright Tumult Labs 2025
 
 from typing import Dict, Tuple, Type, Union
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from pyspark.sql import DataFrame
@@ -16,6 +16,7 @@ from tmlt.core.utils.exact_number import ExactNumber
 
 from tmlt.analytics import (
     AddOneRow,
+    AnalyticsInternalError,
     ApproxDPBudget,
     KeySet,
     PrivacyBudget,
@@ -190,6 +191,86 @@ class TestInvalidSession:
                 column="A",
                 splits={"part_0": "0", "part_1": "1"},
             )
+
+    @staticmethod
+    def _budgets_for(
+        output_measure: Union[PureDP, ApproxDP, RhoZCDP],
+    ) -> Tuple[PrivacyBudget, PrivacyBudget, PrivacyBudget]:
+        """Returns (session budget, query budget, larger budget) for a measure."""
+        if output_measure == PureDP():
+            return PureDPBudget(10), PureDPBudget(1), PureDPBudget(2)
+        if output_measure == ApproxDP():
+            return ApproxDPBudget(10, 0.5), ApproxDPBudget(1, 0), ApproxDPBudget(2, 0)
+        return RhoZCDPBudget(10), RhoZCDPBudget(1), RhoZCDPBudget(2)
+
+    def _multi_table_session(self, session_budget: PrivacyBudget) -> Session:
+        builder = Session.Builder().with_privacy_budget(session_budget)
+        for i in range(3):
+            builder = builder.with_private_dataframe(
+                f"private_{i}", self.sdf, protected_change=AddOneRow()
+            )
+        return builder.build()
+
+    @pytest.mark.parametrize("output_measure", [(PureDP()), (ApproxDP()), (RhoZCDP())])
+    def test_evaluate_rejects_measurement_exceeding_budget(
+        self, output_measure: Union[PureDP, ApproxDP, RhoZCDP]
+    ):
+        """Evaluate rejects a measurement whose privacy loss exceeds the budget.
+
+        Session.evaluate relies on the privacy accountant to check the privacy
+        relation of the compiled measurement. Simulate a compiler bug that returns a
+        measurement using more budget than requested, and check that it is rejected
+        with an internal error, before any budget is spent.
+        """
+        session_budget, query_budget, larger_budget = self._budgets_for(output_measure)
+        session = self._multi_table_session(session_budget)
+        query = QueryBuilder("private_1").count()
+        compile_and_get_info = session._compile_and_get_info
+        too_expensive_measurement, _, noise_info = compile_and_get_info(
+            query._query_expr, larger_budget
+        )
+        _, adjusted_budget, _ = compile_and_get_info(query._query_expr, query_budget)
+        with patch.object(
+            session,
+            "_compile_and_get_info",
+            return_value=(too_expensive_measurement, adjusted_budget, noise_info),
+        ):
+            with pytest.raises(
+                AnalyticsInternalError,
+                match=r"similar inputs will \*not\* produce similar outputs",
+            ) as exc_info:
+                session.evaluate(query, privacy_budget=query_budget)
+        # The accountant's own check produced the error.
+        assert isinstance(exc_info.value.__cause__, ValueError)
+        assert "does not satisfy the privacy relation" in str(exc_info.value.__cause__)
+        assert session.remaining_privacy_budget == session_budget
+
+        # The Session is still usable, and correct measurements are accepted.
+        session.evaluate(query, privacy_budget=query_budget)
+        assert session.remaining_privacy_budget != session_budget
+
+    def test_evaluate_rejects_mismatched_measurement(self):
+        """Evaluate rejects a measurement built for a different input metric.
+
+        This is not a privacy relation failure, so the accountant's error is raised
+        unchanged, and no budget is spent.
+        """
+        session = self._multi_table_session(PureDPBudget(10))
+        other_session = Session.from_dataframe(
+            privacy_budget=PureDPBudget(10),
+            source_id="private_1",
+            dataframe=self.sdf,
+            protected_change=AddOneRow(),
+        )
+        query = QueryBuilder("private_1").count()
+        mismatched = other_session._compile_and_get_info(
+            query._query_expr, PureDPBudget(1)
+        )
+        with patch.object(session, "_compile_and_get_info", return_value=mismatched):
+            with pytest.raises(ValueError, match="does not match") as exc_info:
+                session.evaluate(query, privacy_budget=PureDPBudget(1))
+        assert not isinstance(exc_info.value, AnalyticsInternalError)
+        assert session.remaining_privacy_budget == PureDPBudget(10)
 
     def test_invalid_grouping_with_view(self):
         """Tests that grouping flatmap + rename fails if not used in a later groupby."""
